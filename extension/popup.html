@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="styles.css" />
+    <title>AI Usage Predictor</title>
+  </head>
+  <body class="ai-popup">
+    <div class="ai-card">
+      <div class="ai-title">AI Usage Predictor</div>
+      <div class="ai-row">
+        <span>Session tokens</span>
+        <span id="sessionTokens">0</span>
+      </div>
+      <div class="ai-meter">
+        <div class="ai-meter-fill" id="riskFill"></div>
+      </div>
+      <div class="ai-risk-label" id="riskLabel">green</div>
+      <button class="ai-button" id="resetBtn">Reset session</button>
+      <div class="ai-note" id="statusText"></div>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>
