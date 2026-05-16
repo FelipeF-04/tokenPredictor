@@ -34,4 +34,5 @@ Notes
 
 - Tokenization uses `cl100k_base` via `tiktoken`.
 - Heuristic multipliers: 1.2 (short), 1.5 (default), 1.8 (code).
+- Output estimation is skipped for messages below `output_estimate_min_tokens` (default 30).
 - Session token state is held in-memory on the backend and in `chrome.storage.local` for the extension; resetting the popup sends a reset to the backend.

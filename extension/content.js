@@ -138,24 +138,19 @@ async function analyzeMessage(message) {
     return;
   }
 
-  try {
-    const response = await fetch(`${BACKEND_URL}/analyze`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: trimmed }),
-    });
-
-    if (!response.ok) {
-      throw new Error("Backend error");
+  chrome.runtime.sendMessage(
+    { action: "analyze", message: trimmed },
+    (response) => {
+      if (response && response.success) {
+        const data = response.data;
+        analysisState = { ...data, message: trimmed };
+        updateWidget(data);
+      } else {
+        analysisState = null;
+        setWidgetError("Backend not reachable");
+      }
     }
-
-    const data = await response.json();
-    analysisState = { ...data, message: trimmed };
-    updateWidget(data);
-  } catch (error) {
-    analysisState = null;
-    setWidgetError("Backend not reachable");
-  }
+  );
 }
 
 function scheduleAnalyze(message) {
@@ -184,11 +179,10 @@ function commitUsage() {
     chrome.storage.local.set({ [STORAGE_KEY]: current + deltaTokens });
   });
 
-  fetch(`${BACKEND_URL}/commit`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ delta_tokens: deltaTokens }),
-  }).catch(() => {});
+  chrome.runtime.sendMessage(
+    { action: "commit", delta_tokens: deltaTokens },
+    () => {}
+  );
 }
 
 function handleInputEvent(event) {

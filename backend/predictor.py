@@ -29,6 +29,7 @@ _config = _load_config()
 TOKEN_WINDOW = int(_config.get("token_window", 8000))
 RISK_YELLOW = float(_config.get("risk_thresholds", {}).get("yellow", 0.6))
 RISK_RED = float(_config.get("risk_thresholds", {}).get("red", 0.85))
+OUTPUT_ESTIMATE_MIN_TOKENS = int(_config.get("output_estimate_min_tokens", 30))
 
 
 def pick_multiplier(message, input_tokens):
@@ -41,6 +42,8 @@ def pick_multiplier(message, input_tokens):
 
 def predict_output_tokens(message, input_tokens):
     if input_tokens <= 0:
+        return 0
+    if OUTPUT_ESTIMATE_MIN_TOKENS > 0 and input_tokens < OUTPUT_ESTIMATE_MIN_TOKENS:
         return 0
     multiplier = pick_multiplier(message, input_tokens)
     return int(math.ceil(input_tokens * multiplier))
