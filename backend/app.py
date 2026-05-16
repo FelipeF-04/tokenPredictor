@@ -2,10 +2,12 @@ from flask import Flask, jsonify, request
 
 from predictor import predict_output_tokens, risk_level
 from tokenizer import count_tokens
+from optimization.pipeline import OptimizationPipeline
 
 app = Flask(__name__)
 
 _session_tokens = 0
+_pipeline = OptimizationPipeline()
 
 
 def _json_error(message, status=400):
@@ -77,6 +79,22 @@ def commit():
 
     _session_tokens += delta_value
     return jsonify({"session_tokens": _session_tokens})
+
+
+@app.route("/optimize", methods=["POST", "OPTIONS"])
+def optimize():
+    if request.method == "OPTIONS":
+        return _handle_options()
+
+    data = request.get_json(silent=True) or {}
+    try:
+        result = _pipeline.optimize(data)
+    except ValueError as exc:
+        return _json_error(str(exc))
+    except Exception:
+        return _json_error("optimization failed", status=500)
+
+    return jsonify(result)
 
 
 if __name__ == "__main__":
