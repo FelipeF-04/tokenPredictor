@@ -42,6 +42,20 @@ function getInputValue(element) {
   return element.textContent || "";
 }
 
+function setInputValue(element, value) {
+  if (!element) {
+    return;
+  }
+  element.focus();
+  if (element.tagName === "TEXTAREA" || element.tagName === "INPUT") {
+    element.value = value;
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    return;
+  }
+  element.textContent = value;
+  element.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 function findInputElement() {
   const textareas = Array.from(document.querySelectorAll("textarea")).filter(isVisible);
   if (textareas.length > 0) {

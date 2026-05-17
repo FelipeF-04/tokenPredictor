@@ -180,6 +180,23 @@
   background: #eef2f7;
 }
 
+.ai-usage-apply {
+  margin-top: 6px;
+  width: 100%;
+  border: 1px solid var(--ai-border);
+  border-radius: 6px;
+  padding: 4px 6px;
+  background: #0f172a;
+  color: #ffffff;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.ai-usage-apply:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .ai-usage-preview {
   margin-top: 6px;
   border-top: 1px solid var(--ai-border);
