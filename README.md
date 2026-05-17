@@ -1,23 +1,26 @@
 # AI Usage Predictor
 
-AI Usage Predictor estimates token usage before you send a message in a ChatGPT-style UI and warns you when a conversation is approaching a model's context limit. It is useful when you want to avoid surprises like truncated responses or lost context, while keeping everything local.
+AI Usage Predictor is a small, local companion for ChatGPT-style UIs. It estimates token usage before you hit send, so you can avoid clipped replies, surprise context loss, or guessing how big a prompt really is.
 
-## What it solves
+## Purpose
 
-- Gives a live preview of input tokens, predicted output tokens, and projected total.
-- Shows a simple risk indicator (green/yellow/red) for how close you are to the context window.
-- Helps you decide when to shorten a prompt, split a task, or reset a session.
+Most chat UIs hide token counts. This project makes them visible in real time and keeps the decision in your hands: shorten a prompt, split a task, or reset a session before you run into limits.
+
+## What you get
+
+- Live input token count and predicted output estimate.
+- A simple risk color (green/yellow/red) for the current session.
+- A session total that updates when you send messages.
 
 ## How it works (end to end)
 
-1. A Chrome extension injects a floating widget into ChatGPT-style pages.
-2. As you type, the content script sends your current message to a local Flask backend.
-3. The backend tokenizes the input and predicts output tokens using small heuristics.
-4. A risk score is calculated using configured thresholds for the context window.
-5. The widget updates live, and the popup shows session totals.
-6. When you send a message, the extension commits the projected total to keep the session count accurate.
+1. A Chrome extension injects a small floating widget near the message box.
+2. As you type, the content script sends your draft to a local Flask backend.
+3. The backend tokenizes input and estimates output with light heuristics.
+4. A risk score is computed using configurable context thresholds.
+5. When you send a message, the session total is committed.
 
-## Architecture
+## Built with
 
 - Backend: Python Flask API for token counting and risk scoring.
 - Tokenization: `tiktoken` with `cl100k_base` encoding.
@@ -34,7 +37,12 @@ AI Usage Predictor estimates token usage before you send a message in a ChatGPT-
 - [extension/popup.js](extension/popup.js) - Popup logic + reset action.
 - [shared/config.json](shared/config.json) - Token window and thresholds.
 
-## Quick start (Windows)
+## Configuration
+
+- Backend thresholds and window size live in [shared/config.json](shared/config.json).
+- Popup thresholds are currently defined in [extension/popup.js](extension/popup.js). Keep these aligned with the shared config when you change window sizes or risk levels.
+
+## Run it locally (optional)
 
 1. Create a virtual environment and install dependencies:
 
@@ -64,11 +72,6 @@ python backend/app.py
 python backend/test_backend.py
 ```
 
-## Configuration
-
-- Backend thresholds and window size live in [shared/config.json](shared/config.json).
-- Popup thresholds are currently defined in [extension/popup.js](extension/popup.js). Keep these aligned with the shared config when you change window sizes or risk levels.
-
 ## API endpoints (local)
 
 - `POST /analyze` - Returns input tokens, predicted output tokens, projected total, and risk.
@@ -80,9 +83,3 @@ python backend/test_backend.py
 - The backend must be running at `http://localhost:5000` for live updates.
 - Backend session totals reset when the server restarts.
 - Output prediction uses heuristics, so treat it as an estimate, not an exact count.
-
-## Why this is useful
-
-- Prevents overlong prompts that blow past context limits.
-- Makes token usage visible in a workflow that normally hides it.
-- Keeps everything local so your prompts are not sent to third-party services beyond the page you are already using.
