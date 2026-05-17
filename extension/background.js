@@ -22,6 +22,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true; // Keep channel open for async response
   }
 
+  if (request.action === "optimize") {
+    fetch(`${BACKEND_URL}/optimize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request.payload || {}),
+    })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("Backend error");
+        }
+        return response.json();
+      })
+      .then((data) => {
+        sendResponse({ success: true, data });
+      })
+      .catch((error) => {
+        sendResponse({ success: false, error: error.message });
+      });
+    return true;
+  }
+
   if (request.action === "commit") {
     fetch(`${BACKEND_URL}/commit`, {
       method: "POST",

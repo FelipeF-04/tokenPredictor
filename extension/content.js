@@ -1,6 +1,20 @@
 const BACKEND_URL = "http://localhost:5000";
 const STORAGE_KEY = "sessionTokens";
-const ANALYZE_DEBOUNCE_MS = 400;
+const OPTIMIZE_DEBOUNCE_MS = 500;
+const DEFAULT_MODEL_PROFILE = "gpt-4o-mini";
+const DEFAULT_STRATEGY = "auto";
+const DEFAULT_RETRIEVAL_MODE = "embedding";
+const DEFAULT_EMBEDDING_PROVIDER = "sentence-transformers";
+const DEFAULT_EMBEDDING_MODEL = "bge-small-en";
+const DEFAULT_OUTPUT_TOKENS = 1024;
+const MAX_HISTORY_MESSAGES = 16;
+const SESSION_ID = (() => {
+  try {
+    return crypto.randomUUID();
+  } catch (error) {
+    return `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+})();
 
 let activeInput = null;
 let analysisState = null;
@@ -52,11 +66,12 @@ function ensureWidget() {
   widget.id = "ai-usage-widget";
   widget.className = "ai-usage-widget ai-usage-hidden";
   widget.innerHTML = `
-    <div class="ai-usage-title">AI Usage</div>
-    <div class="ai-usage-row"><span>Input</span><span id="ai-usage-input">-</span></div>
-    <div class="ai-usage-row"><span>Output</span><span id="ai-usage-output">-</span></div>
-    <div class="ai-usage-row"><span>Total</span><span id="ai-usage-total">-</span></div>
-    <div class="ai-usage-badge ai-usage-badge--green" id="ai-usage-risk">green</div>
+    <div class="ai-usage-title">Context Optimization</div>
+    <div class="ai-usage-row"><span>Original</span><span id="ai-usage-original">-</span></div>
+    <div class="ai-usage-row"><span>Optimized</span><span id="ai-usage-optimized">-</span></div>
+    <div class="ai-usage-row"><span>Savings</span><span id="ai-usage-savings">-</span></div>
+    <div class="ai-usage-row"><span>Chunks kept</span><span id="ai-usage-chunks">-</span></div>
+    <div class="ai-usage-badge ai-usage-badge--green" id="ai-usage-confidence">confidence</div>
     <div class="ai-usage-error" id="ai-usage-error"></div>
   `;
 
@@ -64,10 +79,11 @@ function ensureWidget() {
 
   ui = {
     widget,
-    inputEl: widget.querySelector("#ai-usage-input"),
-    outputEl: widget.querySelector("#ai-usage-output"),
-    totalEl: widget.querySelector("#ai-usage-total"),
-    riskEl: widget.querySelector("#ai-usage-risk"),
+    originalEl: widget.querySelector("#ai-usage-original"),
+    optimizedEl: widget.querySelector("#ai-usage-optimized"),
+    savingsEl: widget.querySelector("#ai-usage-savings"),
+    chunksEl: widget.querySelector("#ai-usage-chunks"),
+    badgeEl: widget.querySelector("#ai-usage-confidence"),
     errorEl: widget.querySelector("#ai-usage-error"),
   };
 
@@ -106,31 +122,103 @@ function setWidgetHidden() {
   widget.classList.add("ai-usage-hidden");
 }
 
+function getConfidenceLevel(confidence) {
+  if (confidence >= 0.8) {
+    return "green";
+  }
+  if (confidence >= 0.6) {
+    return "yellow";
+  }
+  return "red";
+}
+
+function formatCount(value) {
+  if (Number.isFinite(value)) {
+    return value;
+  }
+  return "-";
+}
+
 function updateWidget(data) {
-  const { widget, inputEl, outputEl, totalEl, riskEl, errorEl } = ensureWidget();
+  const {
+    widget,
+    originalEl,
+    optimizedEl,
+    savingsEl,
+    chunksEl,
+    badgeEl,
+    errorEl,
+  } = ensureWidget();
   errorEl.textContent = "";
 
-  inputEl.textContent = data.input_tokens;
-  outputEl.textContent = data.predicted_output_tokens;
-  totalEl.textContent = data.projected_total_tokens;
+  const tokenCounts = data?.optimized?.token_counts || {};
+  const original = Number(tokenCounts.original);
+  const optimized = Number(tokenCounts.optimized);
+  const savings = Number.isFinite(original) && Number.isFinite(optimized)
+    ? Math.max(original - optimized, 0)
+    : NaN;
+  const confidenceValue = Number(data?.metrics?.confidence);
+  const totalChunks = Number(data?.stats?.total_chunks);
+  const keptChunks = Number(data?.stats?.kept_chunks);
+  const chunksText = Number.isFinite(totalChunks) && totalChunks > 0
+    ? `${keptChunks}/${totalChunks}`
+    : "-";
+  const confidenceText = Number.isFinite(confidenceValue)
+    ? `confidence ${Math.round(confidenceValue * 100)}%`
+    : "confidence -";
 
-  const risk = data.risk_level || "green";
-  riskEl.textContent = risk;
-  riskEl.classList.remove("ai-usage-badge--green", "ai-usage-badge--yellow", "ai-usage-badge--red");
-  riskEl.classList.add(`ai-usage-badge--${risk}`);
+  originalEl.textContent = formatCount(original);
+  optimizedEl.textContent = formatCount(optimized);
+  savingsEl.textContent = formatCount(savings);
+  chunksEl.textContent = chunksText;
+
+  const confidenceLevel = Number.isFinite(confidenceValue)
+    ? getConfidenceLevel(confidenceValue)
+    : "green";
+  badgeEl.textContent = confidenceText;
+  badgeEl.classList.remove("ai-usage-badge--green", "ai-usage-badge--yellow", "ai-usage-badge--red");
+  badgeEl.classList.add(`ai-usage-badge--${confidenceLevel}`);
 
   widget.classList.remove(
     "ai-usage-widget--green",
     "ai-usage-widget--yellow",
     "ai-usage-widget--red"
   );
-  widget.classList.add(`ai-usage-widget--${risk}`);
+  widget.classList.add(`ai-usage-widget--${confidenceLevel}`);
 
   widget.classList.remove("ai-usage-hidden");
   positionWidget(activeInput);
 }
 
-async function analyzeMessage(message) {
+function collectConversationMessages(maxMessages) {
+  const nodes = Array.from(document.querySelectorAll("[data-message-author-role]"));
+  const results = [];
+  const seen = new Set();
+
+  for (const node of nodes) {
+    const role = (node.getAttribute("data-message-author-role") || "").trim();
+    if (!role) {
+      continue;
+    }
+    const content = (node.innerText || "").trim();
+    if (!content) {
+      continue;
+    }
+    const key = `${role}|${content}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    results.push({ role, content });
+  }
+
+  if (results.length > maxMessages) {
+    return results.slice(-maxMessages);
+  }
+  return results;
+}
+
+async function optimizeMessage(message) {
   const trimmed = message.trim();
   if (!trimmed) {
     analysisState = null;
@@ -138,12 +226,40 @@ async function analyzeMessage(message) {
     return;
   }
 
+  const historyMessages = collectConversationMessages(MAX_HISTORY_MESSAGES);
+  const lastHistory = historyMessages[historyMessages.length - 1];
+  if (!lastHistory || lastHistory.role !== "user" || lastHistory.content !== trimmed) {
+    historyMessages.push({ role: "user", content: trimmed });
+  }
+
   chrome.runtime.sendMessage(
-    { action: "analyze", message: trimmed },
+    {
+      action: "optimize",
+      payload: {
+        session_id: SESSION_ID,
+        model_profile: DEFAULT_MODEL_PROFILE,
+        strategy: DEFAULT_STRATEGY,
+        embedding_provider: DEFAULT_EMBEDDING_PROVIDER,
+        embedding_model: DEFAULT_EMBEDDING_MODEL,
+        retrieval_mode: DEFAULT_RETRIEVAL_MODE,
+        messages: historyMessages,
+        options: {
+          include_trace: false,
+          include_removed_chunks: false,
+          max_output_tokens: DEFAULT_OUTPUT_TOKENS,
+        },
+      },
+    },
     (response) => {
       if (response && response.success) {
         const data = response.data;
-        analysisState = { ...data, message: trimmed };
+        const tokenCounts = data?.optimized?.token_counts || {};
+        analysisState = {
+          ...data,
+          message: trimmed,
+          original_tokens: Number(tokenCounts.original) || 0,
+          optimized_tokens: Number(tokenCounts.optimized) || 0,
+        };
         updateWidget(data);
       } else {
         analysisState = null;
@@ -153,13 +269,13 @@ async function analyzeMessage(message) {
   );
 }
 
-function scheduleAnalyze(message) {
+function scheduleOptimize(message) {
   clearTimeout(debounceId);
-  debounceId = setTimeout(() => analyzeMessage(message), ANALYZE_DEBOUNCE_MS);
+  debounceId = setTimeout(() => optimizeMessage(message), OPTIMIZE_DEBOUNCE_MS);
 }
 
 function commitUsage() {
-  if (!analysisState || !analysisState.projected_total_tokens) {
+  if (!analysisState) {
     return;
   }
 
@@ -169,7 +285,7 @@ function commitUsage() {
   }
 
   lastCommittedText = message;
-  const deltaTokens = Number(analysisState.projected_total_tokens) || 0;
+  const deltaTokens = Number(analysisState.optimized_tokens || analysisState.original_tokens || 0);
   if (deltaTokens <= 0) {
     return;
   }
@@ -187,7 +303,7 @@ function commitUsage() {
 
 function handleInputEvent(event) {
   const message = getInputValue(event.target);
-  scheduleAnalyze(message);
+  scheduleOptimize(message);
 }
 
 function handleKeydown(event) {

@@ -206,6 +206,11 @@ class OptimizationPipeline:
             "model_profile": profile.name,
             "strategy": strategy.name,
             "deterministic": self.config.deterministic,
+            "stats": {
+                "total_chunks": len(chunks),
+                "kept_chunks": len(selected_chunks),
+                "removed_chunks": sum(1 for chunk in chunks if chunk.removed),
+            },
             "optimized": {
                 "instructions": [
                     {
