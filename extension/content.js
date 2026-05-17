@@ -8,6 +8,7 @@ const DEFAULT_EMBEDDING_PROVIDER = "sentence-transformers";
 const DEFAULT_EMBEDDING_MODEL = "bge-small-en";
 const DEFAULT_OUTPUT_TOKENS = 1024;
 const MAX_HISTORY_MESSAGES = 16;
+const MAX_PREVIEW_CHARS = 3000;
 const SESSION_ID = (() => {
   try {
     return crypto.randomUUID();
@@ -21,6 +22,7 @@ let analysisState = null;
 let debounceId = null;
 let lastCommittedText = "";
 let ui = null;
+let previewVisible = false;
 
 function isVisible(element) {
   if (!element) {
@@ -72,6 +74,12 @@ function ensureWidget() {
     <div class="ai-usage-row"><span>Savings</span><span id="ai-usage-savings">-</span></div>
     <div class="ai-usage-row"><span>Chunks kept</span><span id="ai-usage-chunks">-</span></div>
     <div class="ai-usage-badge ai-usage-badge--green" id="ai-usage-confidence">confidence</div>
+    <button class="ai-usage-toggle" id="ai-usage-toggle" type="button">Show packed prompt</button>
+    <button class="ai-usage-apply" id="ai-usage-apply" type="button" disabled>Apply optimized prompt</button>
+    <div class="ai-usage-preview ai-usage-preview--hidden" id="ai-usage-preview">
+      <div class="ai-usage-preview-title">Packed prompt</div>
+      <pre class="ai-usage-preview-body" id="ai-usage-preview-body"></pre>
+    </div>
     <div class="ai-usage-error" id="ai-usage-error"></div>
   `;
 
@@ -84,8 +92,30 @@ function ensureWidget() {
     savingsEl: widget.querySelector("#ai-usage-savings"),
     chunksEl: widget.querySelector("#ai-usage-chunks"),
     badgeEl: widget.querySelector("#ai-usage-confidence"),
+    toggleEl: widget.querySelector("#ai-usage-toggle"),
+    previewEl: widget.querySelector("#ai-usage-preview"),
+    previewBodyEl: widget.querySelector("#ai-usage-preview-body"),
     errorEl: widget.querySelector("#ai-usage-error"),
+    applyEl: widget.querySelector("#ai-usage-apply"),
   };
+
+  ui.toggleEl.addEventListener("click", () => {
+    previewVisible = !previewVisible;
+    ui.previewEl.classList.toggle("ai-usage-preview--hidden", !previewVisible);
+    ui.toggleEl.textContent = previewVisible ? "Hide packed prompt" : "Show packed prompt";
+    positionWidget(activeInput);
+  });
+
+  ui.applyEl.addEventListener("click", () => {
+    if (!analysisState || !analysisState.packed_prompt_text) {
+      return;
+    }
+    if (!activeInput) {
+      return;
+    }
+    setInputValue(activeInput, analysisState.packed_prompt_text);
+    scheduleOptimize(analysisState.packed_prompt_text);
+  });
 
   return ui;
 }
@@ -139,6 +169,27 @@ function formatCount(value) {
   return "-";
 }
 
+function clipText(text, maxChars) {
+  if (!text || text.length <= maxChars) {
+    return text;
+  }
+  return `${text.slice(0, maxChars)}\n... (truncated)`;
+}
+
+function renderPackedPrompt(renderedPrompt) {
+  if (!Array.isArray(renderedPrompt) || renderedPrompt.length === 0) {
+    return "";
+  }
+
+  const parts = renderedPrompt.map((item) => {
+    const role = (item.role || "unknown").toUpperCase();
+    const content = (item.content || "").trim();
+    return `${role}:\n${content}`;
+  });
+
+  return parts.join("\n\n");
+}
+
 function updateWidget(data) {
   const {
     widget,
@@ -147,6 +198,8 @@ function updateWidget(data) {
     savingsEl,
     chunksEl,
     badgeEl,
+    applyEl,
+    previewBodyEl,
     errorEl,
   } = ensureWidget();
   errorEl.textContent = "";
@@ -166,11 +219,15 @@ function updateWidget(data) {
   const confidenceText = Number.isFinite(confidenceValue)
     ? `confidence ${Math.round(confidenceValue * 100)}%`
     : "confidence -";
+  const packedPrompt = renderPackedPrompt(data?.optimized?.rendered_prompt);
 
   originalEl.textContent = formatCount(original);
   optimizedEl.textContent = formatCount(optimized);
   savingsEl.textContent = formatCount(savings);
   chunksEl.textContent = chunksText;
+  const previewText = packedPrompt || "No packed prompt available yet.";
+  previewBodyEl.textContent = clipText(previewText, MAX_PREVIEW_CHARS) || "";
+  applyEl.disabled = !packedPrompt;
 
   const confidenceLevel = Number.isFinite(confidenceValue)
     ? getConfidenceLevel(confidenceValue)
@@ -254,11 +311,13 @@ async function optimizeMessage(message) {
       if (response && response.success) {
         const data = response.data;
         const tokenCounts = data?.optimized?.token_counts || {};
+        const packedPrompt = renderPackedPrompt(data?.optimized?.rendered_prompt);
         analysisState = {
           ...data,
           message: trimmed,
           original_tokens: Number(tokenCounts.original) || 0,
           optimized_tokens: Number(tokenCounts.optimized) || 0,
+          packed_prompt_text: packedPrompt,
         };
         updateWidget(data);
       } else {
