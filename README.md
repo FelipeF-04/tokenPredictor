@@ -6,11 +6,35 @@ AI Usage Predictor is a small, local companion for ChatGPT-style UIs. It estimat
 
 Most chat UIs hide token counts. This project makes them visible in real time and keeps the decision in your hands: shorten a prompt, split a task, or reset a session before you run into limits.
 
+## Real-world use cases
+
+- You are writing a long prompt and want to know if it is getting too large before you send it.
+- You are building a multi-step conversation and want to avoid losing context halfway through.
+- You are sending code or technical details and want a rough estimate of how expensive the message is.
+- You are managing multiple prompts in one session and want a simple way to stay under the context window.
+
 ## What you get
 
 - Live input token count and predicted output estimate.
 - A simple risk color (green/yellow/red) for the current session.
 - A session total that updates when you send messages.
+
+## What it looks like
+
+This is a lightweight overlay that appears near the message box and gives you a quick read before you send:
+
+```text
+-------------------------------------------------
+AI Usage Predictor                                 
+-------------------------------------------------
+Input tokens:        84                            
+Predicted output:    132                           
+Projected total:     216                           
+Risk:                yellow                       
+-------------------------------------------------
+```
+
+The popup gives you the same idea at a session level, so you can see how the conversation is trending over time.
 
 ## How it works (end to end)
 
