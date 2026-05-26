@@ -1,68 +1,173 @@
-# AI Usage Predictor — Project Description
+# AI Usage Predictor — Project Description (Detailed)
 
-## What this project solves
+## One-sentence summary
 
-AI Usage Predictor helps you estimate token usage before you send a message in a ChatGPT-style UI and shows a simple risk indicator for how close a conversation is to a model's context window. It reduces surprises like truncated responses or sudden context loss by giving you a quick, local preview of input tokens, predicted output tokens, and a projected total.
+AI Usage Predictor is a local Chrome extension plus Flask backend that estimates token usage and can compress chat history into a packed prompt, so you can stay inside an LLM context window before you hit send.
 
-## How it was built
+## What problem this solves
 
-- **Backend**: A lightweight Python Flask service counts tokens and calculates risk. It uses `tiktoken` with the `cl100k_base` encoding to approximate model tokenization.
-- **Prediction logic**: A small heuristic model applies multipliers to estimate output tokens based on message length and whether the message looks like code.
-- **Chrome extension**: A Manifest V3 extension injects a floating widget into ChatGPT-style pages and provides a popup for session totals and reset.
-- **State**: Session totals are stored in memory on the backend and in `chrome.storage.local` for the extension so the popup stays updated.
-- **Config**: Shared thresholds and token window live in [shared/config.json](shared/config.json) for backend risk calculations.
+Chat UIs rarely show token usage. That hides cost and risk: replies can be truncated, and older context can silently drop. This project makes those limits visible and provides an optional optimization step that trims or compresses previous messages to fit the window.
 
-## How it works (end to end)
+## Core features
 
-1. **Page detection**: The content script runs on `chat.openai.com` and `chatgpt.com` and looks for visible text inputs or contenteditable fields.
-2. **Live analysis**: As you type, the script debounces input and sends the current message to the backend `/analyze` endpoint.
-3. **Token counting**: The backend counts input tokens using `tiktoken` and predicts output tokens using heuristic multipliers.
-4. **Risk scoring**: The backend combines the current session total with the projected total and maps it to `green`, `yellow`, or `red` based on the configured thresholds.
-5. **UI feedback**: The floating widget updates near the input with input, output, total, and risk labels.
-6. **Commit on send**: When you press Enter (send), the extension commits the projected total to both local storage and the backend `/commit` endpoint so the session total increments.
-7. **Popup summary**: The popup reads the session total from `chrome.storage.local` and renders a meter with the same risk thresholds.
+- Real-time token estimation and risk color (green/yellow/red) for a draft message.
+- Session-level token tracking that increments when you send a message.
+- Context optimization that selects the most relevant chunks from recent conversation and returns a packed prompt with confidence metrics.
+- Local-only processing: your message text goes to a local Flask server, not a third party.
 
-## Key components
+## Architecture at a glance
 
-- Backend Flask service: [backend/app.py](backend/app.py)
-- Tokenization: [backend/tokenizer.py](backend/tokenizer.py)
-- Prediction + risk logic: [backend/predictor.py](backend/predictor.py)
-- Content script widget: [extension/content.js](extension/content.js)
-- Popup UI + reset: [extension/popup.html](extension/popup.html), [extension/popup.js](extension/popup.js)
-- Config: [shared/config.json](shared/config.json)
+Browser page (ChatGPT UI)
+	-> content script (floating widget, message capture)
+	-> background service worker (HTTP bridge)
+	-> local Flask API (tokenization + optimization)
+	-> response back to the widget + popup
 
-## Build and run (local)
+## End-to-end flows
 
-1. Create a virtual environment and install dependencies:
+### 1) Live optimization while typing
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+1. The content script finds the active input field and collects the latest conversation messages from the DOM (up to 16 messages by default).
+2. It debounces input and sends a payload to `POST /optimize`.
+3. The backend optimization pipeline:
+	 - Chunks messages by semantic boundaries and token size.
+	 - Embeds chunks and extracts repeated instructions.
+	 - Scores chunks by relevance to the inferred query.
+	 - Allocates a token budget based on the selected model profile.
+	 - Deduplicates, assigns memory tiers, and selects chunks that fit the budget.
+	 - Renders a packed prompt and computes preservation/confidence metrics.
+4. The widget shows original vs. optimized tokens, savings, kept chunks, and a preview.
+
+### 2) Commit on send
+
+1. When Enter or the send button is pressed, the extension commits the token delta.
+2. The delta is stored in `chrome.storage.local` and sent to `POST /commit` so the backend session total stays in sync.
+
+### 3) Simple estimate API (optional)
+
+`POST /analyze` is a lightweight endpoint that returns input token count, predicted output tokens, projected total, and risk level.
+
+## Optimization pipeline details
+
+The optimization pipeline is implemented in the backend optimization package and returns a structured response:
+
+- **Chunking**: Splits messages into chunks with overlap so meaning is preserved.
+- **Embedding + retrieval**: Uses sentence-transformers (default `bge-small-en`) to compute chunk relevance; supports embedding, lexical, or hybrid scoring.
+- **Instruction extraction**: Detects repeated instructions across chunks and budgets them separately.
+- **Budgeting**: Uses model profiles (context window, output budget, memory ratios) to compute how much conversation can fit.
+- **Strategies**:
+	- `lossless`: remove near-duplicates only.
+	- `balanced`: trim low relevance with moderate compression.
+	- `aggressive`: maximize token reduction.
+- **Validation + metrics**: Estimates semantic and instruction preservation plus a confidence score.
+
+## Data and state
+
+- Backend session tokens are stored in memory only and reset when the server restarts.
+- Extension session tokens are stored in `chrome.storage.local` for the popup UI.
+- A randomly generated session id is used for optimization requests to keep per-session trace data consistent.
+
+## Configuration and defaults
+
+Shared backend config lives in `shared/config.json`:
+
+- `token_window`: default 8000
+- `risk_thresholds.yellow`: 0.6
+- `risk_thresholds.red`: 0.85
+- `output_estimate_min_tokens`: 30
+
+Popup thresholds are currently hard-coded in the extension and should be kept in sync with shared config.
+
+Model profiles used by the optimizer are defined in the backend and include:
+
+- `gpt-4o-mini`, `gpt-4.1`, `gpt-5`
+- `local-8k`, `local-16k`
+
+## Supported sites
+
+- https://chat.openai.com/*
+- https://chatgpt.com/*
+
+## Local API (summary)
+
+### `POST /analyze`
+
+Request:
+
+```json
+{ "message": "text" }
 ```
 
-2. Start the backend:
+Response:
 
-```bash
-python backend/app.py
+```json
+{
+	"input_tokens": 120,
+	"predicted_output_tokens": 180,
+	"projected_total_tokens": 300,
+	"risk_level": "yellow"
+}
 ```
 
-3. Load the extension:
+### `POST /commit`
 
-- Open `chrome://extensions`
-- Enable Developer mode
-- Click **Load unpacked** and select the [extension/](extension/) folder
+Request:
 
-4. Open ChatGPT and type a message. You should see a small floating widget with token estimates.
-
-5. Optional backend sanity check:
-
-```bash
-python backend/test_backend.py
+```json
+{ "delta_tokens": 300 }
 ```
 
-## Notes and constraints
+or
 
-- The backend listens on `http://localhost:5000` and must be running for the widget to update.
-- Backend session totals reset when the server restarts; the extension can also reset totals from the popup.
-- The popup uses thresholds defined in [extension/popup.js](extension/popup.js). Keep them in sync with [shared/config.json](shared/config.json) if you change the window or thresholds.
+```json
+{ "reset": true }
+```
+
+Response:
+
+```json
+{ "session_tokens": 1200 }
+```
+
+### `POST /optimize`
+
+Request (core fields):
+
+```json
+{
+	"session_id": "uuid",
+	"model_profile": "gpt-4o-mini",
+	"strategy": "auto",
+	"retrieval_mode": "embedding",
+	"embedding_provider": "sentence-transformers",
+	"embedding_model": "bge-small-en",
+	"messages": [{ "role": "user", "content": "..." }]
+}
+```
+
+Response (high level):
+
+```json
+{
+	"optimized": {
+		"token_counts": { "original": 1200, "optimized": 640 },
+		"rendered_prompt": ["USER: ...", "ASSISTANT: ..."]
+	},
+	"metrics": { "confidence": 0.84 },
+	"stats": { "total_chunks": 18, "kept_chunks": 10 }
+}
+```
+
+## Dependencies
+
+- flask
+- tiktoken
+- sentence-transformers
+- numpy
+
+## Known constraints
+
+- Output prediction is heuristic and meant to be an estimate.
+- The backend must be running at `http://localhost:5000` for live updates.
+- The DOM selectors depend on current ChatGPT page structure and may require updates.
+- CORS is open to all origins for local use.
