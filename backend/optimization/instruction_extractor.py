@@ -3,7 +3,7 @@ import re
 from typing import Iterable, List, Tuple
 
 from tokenizer import count_tokens
-from .embeddings import EmbeddingCache, EmbeddingProvider, make_embedding_key
+from .embeddings import EmbeddingCache, EmbeddingProvider, hash_text, make_embedding_key
 from .models import Instruction, TraceEvent
 
 
@@ -117,7 +117,7 @@ class InstructionExtractor:
                 source_chunk_ids=[chunk_id],
                 score=_instruction_score(text, 1),
                 embedding_key=make_embedding_key(
-                    self.provider.name, self.provider.model_name, text
+                    self.provider.name, self.provider.model_name, hash_text(text)
                 ),
             )
             trace_events.append(
@@ -158,7 +158,9 @@ class InstructionExtractor:
         missing: List[str] = []
         missing_indices: List[int] = []
         for idx, text in enumerate(texts):
-            key = make_embedding_key(self.provider.name, self.provider.model_name, text)
+            key = make_embedding_key(
+                self.provider.name, self.provider.model_name, hash_text(text)
+            )
             cached = self.cache.get(key)
             if cached is None:
                 missing.append(text)
@@ -170,7 +172,9 @@ class InstructionExtractor:
             computed = self.provider.embed_texts(missing)
             for offset, vector in enumerate(computed):
                 idx = missing_indices[offset]
-                key = make_embedding_key(self.provider.name, self.provider.model_name, texts[idx])
+                key = make_embedding_key(
+                    self.provider.name, self.provider.model_name, hash_text(texts[idx])
+                )
                 self.cache.set(key, vector)
                 embeddings[idx] = vector
         return embeddings

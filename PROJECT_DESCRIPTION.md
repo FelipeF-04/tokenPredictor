@@ -63,20 +63,20 @@ The optimization pipeline is implemented in the backend optimization package and
 
 ## Data and state
 
-- Backend session tokens are stored in memory only and reset when the server restarts.
-- Extension session tokens are stored in `chrome.storage.local` for the popup UI.
+- Backend session tokens are persisted locally in SQLite and recover after restart.
+- Extension session tokens are stored per-session in `chrome.storage.local` for the popup UI.
 - A randomly generated session id is used for optimization requests to keep per-session trace data consistent.
 
 ## Configuration and defaults
 
-Shared backend config lives in `shared/config.json`:
+Shared backend config lives in `shared/config.json` and is served via `GET /config`:
 
 - `token_window`: default 8000
 - `risk_thresholds.yellow`: 0.6
 - `risk_thresholds.red`: 0.85
 - `output_estimate_min_tokens`: 30
 
-Popup thresholds are currently hard-coded in the extension and should be kept in sync with shared config.
+The extension consumes backend config at startup and falls back to its bundled config copy when offline.
 
 Model profiles used by the optimizer are defined in the backend and include:
 

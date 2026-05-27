@@ -53,6 +53,15 @@ class Chunk:
 
 
 @dataclass
+class ChunkSnapshot:
+    chunk_id: str
+    text: str
+    role: str
+    message_id: str
+    tokens: int
+
+
+@dataclass
 class Instruction:
     instruction_id: str
     text: str
@@ -119,6 +128,8 @@ class SessionState:
     chunks: Dict[str, Chunk] = field(default_factory=dict)
     instructions: Dict[str, Instruction] = field(default_factory=dict)
     embeddings: Dict[str, List[float]] = field(default_factory=dict)
+    message_hashes: Dict[str, str] = field(default_factory=dict)
+    message_chunks: Dict[str, List[ChunkSnapshot]] = field(default_factory=dict)
     last_updated: float = field(default_factory=lambda: time.time())
 
 

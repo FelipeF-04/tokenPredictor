@@ -1,21 +1,25 @@
-const BACKEND_URL = "http://localhost:5000";
-const STORAGE_KEY = "sessionTokens";
+const STORAGE_KEYS = {
+  sessionTokens: "aiUsageSessionTokens",
+  sessionMap: "aiUsageSessionByConversation",
+  activeSession: "aiUsageActiveSessionId",
+  modelProfile: "aiUsageModelProfile",
+};
+
 const OPTIMIZE_DEBOUNCE_MS = 500;
-const DEFAULT_MODEL_PROFILE = "gpt-4o-mini";
 const DEFAULT_STRATEGY = "auto";
 const DEFAULT_RETRIEVAL_MODE = "embedding";
 const DEFAULT_EMBEDDING_PROVIDER = "sentence-transformers";
 const DEFAULT_EMBEDDING_MODEL = "bge-small-en";
-const DEFAULT_OUTPUT_TOKENS = 1024;
 const MAX_HISTORY_MESSAGES = 16;
 const MAX_PREVIEW_CHARS = 3000;
-const SESSION_ID = (() => {
-  try {
-    return crypto.randomUUID();
-  } catch (error) {
-    return `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  }
-})();
+
+const DEFAULT_CONFIG = {
+  backend_base_url: "http://localhost:5000",
+  default_model_profile: "gpt-4o-mini",
+  token_window: 8000,
+  risk_thresholds: { yellow: 0.6, red: 0.85 },
+  debug: { dom: false },
+};
 
 let activeInput = null;
 let analysisState = null;
@@ -23,54 +27,88 @@ let debounceId = null;
 let lastCommittedText = "";
 let ui = null;
 let previewVisible = false;
+let sessionId = null;
+let selectedModelProfile = null;
+let config = DEFAULT_CONFIG;
+let domObserver = null;
+let domFailures = 0;
+let currentConversationKey = null;
 
-function isVisible(element) {
-  if (!element) {
-    return false;
+function logDebug(message, details) {
+  if (config?.debug?.dom) {
+    // eslint-disable-next-line no-console
+    console.debug("[AI Usage Predictor]", message, details || "");
   }
-  const rect = element.getBoundingClientRect();
-  return rect.width > 0 && rect.height > 0;
 }
 
-function getInputValue(element) {
-  if (!element) {
-    return "";
-  }
-  if (element.tagName === "TEXTAREA" || element.tagName === "INPUT") {
-    return element.value || "";
-  }
-  return element.textContent || "";
+function getConversationKey() {
+  const host = window.location.host || "unknown";
+  const path = window.location.pathname || "/";
+  return `${host}${path}`;
 }
 
-function setInputValue(element, value) {
-  if (!element) {
-    return;
-  }
-  element.focus();
-  if (element.tagName === "TEXTAREA" || element.tagName === "INPUT") {
-    element.value = value;
-    element.dispatchEvent(new Event("input", { bubbles: true }));
-    return;
-  }
-  element.textContent = value;
-  element.dispatchEvent(new Event("input", { bubbles: true }));
+function storageGet(keys) {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(keys, (result) => resolve(result || {}));
+  });
 }
 
-function findInputElement() {
-  const textareas = Array.from(document.querySelectorAll("textarea")).filter(isVisible);
-  if (textareas.length > 0) {
-    return textareas[textareas.length - 1];
+function storageSet(payload) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set(payload, () => resolve());
+  });
+}
+
+async function loadConfig() {
+  const response = await AIUsageAPI.getConfig();
+  if (response && response.success) {
+    config = response.data;
+    return config;
   }
+  config = DEFAULT_CONFIG;
+  return config;
+}
 
-  const editables = Array.from(
-    document.querySelectorAll('[contenteditable="true"]')
-  ).filter(isVisible);
+async function loadSelectedModel() {
+  const stored = await storageGet([STORAGE_KEYS.modelProfile]);
+  selectedModelProfile = stored[STORAGE_KEYS.modelProfile] || config.default_model_profile;
+  return selectedModelProfile;
+}
 
-  if (editables.length > 0) {
-    return editables[editables.length - 1];
+function buildSessionId() {
+  try {
+    return crypto.randomUUID();
+  } catch (error) {
+    return `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   }
+}
 
-  return null;
+async function resolveSessionId() {
+  const conversationKey = getConversationKey();
+  const stored = await storageGet([STORAGE_KEYS.sessionMap, STORAGE_KEYS.activeSession]);
+  const map = stored[STORAGE_KEYS.sessionMap] || {};
+  let current = map[conversationKey];
+  if (!current) {
+    current = buildSessionId();
+    map[conversationKey] = current;
+  }
+  await storageSet({
+    [STORAGE_KEYS.sessionMap]: map,
+    [STORAGE_KEYS.activeSession]: current,
+  });
+  sessionId = current;
+  currentConversationKey = conversationKey;
+  return current;
+}
+
+async function ensureConversationSession() {
+  const conversationKey = getConversationKey();
+  if (conversationKey !== currentConversationKey) {
+    await resolveSessionId();
+    analysisState = null;
+    lastCommittedText = "";
+    setWidgetHidden();
+  }
 }
 
 function ensureWidget() {
@@ -83,6 +121,7 @@ function ensureWidget() {
   widget.className = "ai-usage-widget ai-usage-hidden";
   widget.innerHTML = `
     <div class="ai-usage-title">Context Optimization</div>
+    <div class="ai-usage-model" id="ai-usage-model">Model: -</div>
     <div class="ai-usage-row"><span>Original</span><span id="ai-usage-original">-</span></div>
     <div class="ai-usage-row"><span>Optimized</span><span id="ai-usage-optimized">-</span></div>
     <div class="ai-usage-row"><span>Savings</span><span id="ai-usage-savings">-</span></div>
@@ -106,6 +145,7 @@ function ensureWidget() {
     savingsEl: widget.querySelector("#ai-usage-savings"),
     chunksEl: widget.querySelector("#ai-usage-chunks"),
     badgeEl: widget.querySelector("#ai-usage-confidence"),
+    modelEl: widget.querySelector("#ai-usage-model"),
     toggleEl: widget.querySelector("#ai-usage-toggle"),
     previewEl: widget.querySelector("#ai-usage-preview"),
     previewBodyEl: widget.querySelector("#ai-usage-preview-body"),
@@ -127,7 +167,7 @@ function ensureWidget() {
     if (!activeInput) {
       return;
     }
-    setInputValue(activeInput, analysisState.packed_prompt_text);
+    AIUsageDomExtractors.setInputValue(activeInput, analysisState.packed_prompt_text);
     scheduleOptimize(analysisState.packed_prompt_text);
   });
 
@@ -136,7 +176,7 @@ function ensureWidget() {
 
 function positionWidget(inputElement) {
   const { widget } = ensureWidget();
-  if (!inputElement || !isVisible(inputElement)) {
+  if (!inputElement || !AIUsageDomExtractors.isVisible(inputElement)) {
     widget.classList.add("ai-usage-hidden");
     return;
   }
@@ -212,6 +252,7 @@ function updateWidget(data) {
     savingsEl,
     chunksEl,
     badgeEl,
+    modelEl,
     applyEl,
     previewBodyEl,
     errorEl,
@@ -239,6 +280,7 @@ function updateWidget(data) {
   optimizedEl.textContent = formatCount(optimized);
   savingsEl.textContent = formatCount(savings);
   chunksEl.textContent = chunksText;
+  modelEl.textContent = selectedModelProfile ? `Model: ${selectedModelProfile}` : "Model: -";
   const previewText = packedPrompt || "No packed prompt available yet.";
   previewBodyEl.textContent = clipText(previewText, MAX_PREVIEW_CHARS) || "";
   applyEl.disabled = !packedPrompt;
@@ -262,31 +304,7 @@ function updateWidget(data) {
 }
 
 function collectConversationMessages(maxMessages) {
-  const nodes = Array.from(document.querySelectorAll("[data-message-author-role]"));
-  const results = [];
-  const seen = new Set();
-
-  for (const node of nodes) {
-    const role = (node.getAttribute("data-message-author-role") || "").trim();
-    if (!role) {
-      continue;
-    }
-    const content = (node.innerText || "").trim();
-    if (!content) {
-      continue;
-    }
-    const key = `${role}|${content}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    results.push({ role, content });
-  }
-
-  if (results.length > maxMessages) {
-    return results.slice(-maxMessages);
-  }
-  return results;
+  return AIUsageDomExtractors.extractMessages(document, maxMessages);
 }
 
 async function optimizeMessage(message) {
@@ -303,43 +321,36 @@ async function optimizeMessage(message) {
     historyMessages.push({ role: "user", content: trimmed });
   }
 
-  chrome.runtime.sendMessage(
-    {
-      action: "optimize",
-      payload: {
-        session_id: SESSION_ID,
-        model_profile: DEFAULT_MODEL_PROFILE,
-        strategy: DEFAULT_STRATEGY,
-        embedding_provider: DEFAULT_EMBEDDING_PROVIDER,
-        embedding_model: DEFAULT_EMBEDDING_MODEL,
-        retrieval_mode: DEFAULT_RETRIEVAL_MODE,
-        messages: historyMessages,
-        options: {
-          include_trace: false,
-          include_removed_chunks: false,
-          max_output_tokens: DEFAULT_OUTPUT_TOKENS,
-        },
-      },
+  const response = await AIUsageAPI.optimize({
+    session_id: sessionId,
+    model_profile: selectedModelProfile,
+    strategy: DEFAULT_STRATEGY,
+    embedding_provider: DEFAULT_EMBEDDING_PROVIDER,
+    embedding_model: DEFAULT_EMBEDDING_MODEL,
+    retrieval_mode: DEFAULT_RETRIEVAL_MODE,
+    messages: historyMessages,
+    options: {
+      include_trace: false,
+      include_removed_chunks: false,
     },
-    (response) => {
-      if (response && response.success) {
-        const data = response.data;
-        const tokenCounts = data?.optimized?.token_counts || {};
-        const packedPrompt = renderPackedPrompt(data?.optimized?.rendered_prompt);
-        analysisState = {
-          ...data,
-          message: trimmed,
-          original_tokens: Number(tokenCounts.original) || 0,
-          optimized_tokens: Number(tokenCounts.optimized) || 0,
-          packed_prompt_text: packedPrompt,
-        };
-        updateWidget(data);
-      } else {
-        analysisState = null;
-        setWidgetError("Backend not reachable");
-      }
-    }
-  );
+  });
+
+  if (response && response.success) {
+    const data = response.data;
+    const tokenCounts = data?.optimized?.token_counts || {};
+    const packedPrompt = renderPackedPrompt(data?.optimized?.rendered_prompt);
+    analysisState = {
+      ...data,
+      message: trimmed,
+      original_tokens: Number(tokenCounts.original) || 0,
+      optimized_tokens: Number(tokenCounts.optimized) || 0,
+      packed_prompt_text: packedPrompt,
+    };
+    updateWidget(data);
+  } else {
+    analysisState = null;
+    setWidgetError("Backend not reachable");
+  }
 }
 
 function scheduleOptimize(message) {
@@ -362,20 +373,25 @@ function commitUsage() {
   if (deltaTokens <= 0) {
     return;
   }
+  storageGet([STORAGE_KEYS.sessionTokens])
+    .then((result) => {
+      const current = result[STORAGE_KEYS.sessionTokens] || {};
+      const updated = {
+        ...current,
+        [sessionId]: (Number(current[sessionId]) || 0) + deltaTokens,
+      };
+      return storageSet({
+        [STORAGE_KEYS.sessionTokens]: updated,
+        [STORAGE_KEYS.activeSession]: sessionId,
+      });
+    })
+    .catch(() => {});
 
-  chrome.storage.local.get([STORAGE_KEY], (result) => {
-    const current = Number(result[STORAGE_KEY]) || 0;
-    chrome.storage.local.set({ [STORAGE_KEY]: current + deltaTokens });
-  });
-
-  chrome.runtime.sendMessage(
-    { action: "commit", delta_tokens: deltaTokens },
-    () => {}
-  );
+  AIUsageAPI.commit(sessionId, deltaTokens, selectedModelProfile).catch(() => {});
 }
 
 function handleInputEvent(event) {
-  const message = getInputValue(event.target);
+  const message = AIUsageDomExtractors.getInputValue(event.target);
   scheduleOptimize(message);
 }
 
@@ -397,9 +413,7 @@ function attachToInput(element) {
 }
 
 function hookSendButton() {
-  const button = document.querySelector(
-    'button[aria-label*="Send"], button[data-testid="send-button"]'
-  );
+  const button = AIUsageDomExtractors.findSendButton(document);
 
   if (button && !button.dataset.aiUsageAttached) {
     button.dataset.aiUsageAttached = "true";
@@ -408,15 +422,29 @@ function hookSendButton() {
 }
 
 function ensureInput() {
-  const inputElement = findInputElement();
+  ensureConversationSession().catch(() => {});
+  const inputElement = AIUsageDomExtractors.findInputElement(document);
   if (!inputElement) {
     setWidgetHidden();
+    domFailures += 1;
+    if (domObserver) {
+      domObserver.notifyFailure();
+    }
+    if (domFailures > 8) {
+      setWidgetError("Chat input not detected. Waiting for UI...");
+      logDebug("Input not found", AIUsageDomCompatibility.describe(document));
+    }
     return;
   }
 
   activeInput = inputElement;
   attachToInput(inputElement);
   positionWidget(inputElement);
+  domFailures = 0;
+  if (domObserver) {
+    domObserver.notifySuccess();
+  }
+  logDebug("Input attached", { host: window.location.host });
 }
 
 function startObservers() {
@@ -424,12 +452,12 @@ function startObservers() {
   ensureInput();
   hookSendButton();
 
-  const observer = new MutationObserver(() => {
+  domObserver = AIUsageDomObservers.createObserver(() => {
     ensureInput();
     hookSendButton();
   });
 
-  observer.observe(document.body, { childList: true, subtree: true });
+  domObserver.observe(document.body);
 
   window.addEventListener(
     "scroll",
@@ -448,4 +476,33 @@ function startObservers() {
   });
 }
 
-startObservers();
+async function init() {
+  await loadConfig();
+  await loadSelectedModel();
+  await resolveSessionId();
+
+  const { modelEl } = ensureWidget();
+  if (modelEl) {
+    modelEl.textContent = selectedModelProfile ? `Model: ${selectedModelProfile}` : "Model: -";
+  }
+
+  if (!AIUsageDomCompatibility.isSupportedHost(window.location)) {
+    logDebug("Unsupported host", window.location.host);
+    return;
+  }
+
+  startObservers();
+}
+
+chrome.storage.onChanged.addListener((changes) => {
+  if (changes[STORAGE_KEYS.modelProfile]) {
+    selectedModelProfile = changes[STORAGE_KEYS.modelProfile].newValue || config.default_model_profile;
+    if (ui && ui.modelEl) {
+      ui.modelEl.textContent = selectedModelProfile
+        ? `Model: ${selectedModelProfile}`
+        : "Model: -";
+    }
+  }
+});
+
+init();

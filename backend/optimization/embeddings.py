@@ -1,9 +1,10 @@
-from collections import OrderedDict
 import hashlib
 import threading
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List
 
 import numpy as np
+
+from .cache.embedding_cache import EmbeddingCache, EmbeddingStore
 
 
 _MODEL_NAME_ALIASES = {
@@ -12,29 +13,13 @@ _MODEL_NAME_ALIASES = {
 }
 
 
-class EmbeddingCache:
-    def __init__(self, max_size: int = 20000) -> None:
-        self._max_size = max_size
-        self._store: "OrderedDict[str, List[float]]" = OrderedDict()
-        self._lock = threading.Lock()
-
-    def get(self, key: str) -> Optional[List[float]]:
-        with self._lock:
-            value = self._store.get(key)
-            if value is not None:
-                self._store.move_to_end(key)
-            return value
-
-    def set(self, key: str, value: List[float]) -> None:
-        with self._lock:
-            self._store[key] = value
-            self._store.move_to_end(key)
-            if len(self._store) > self._max_size:
-                self._store.popitem(last=False)
+def hash_text(text: str) -> str:
+    payload = text.encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
-def make_embedding_key(provider_name: str, model_name: str, text: str) -> str:
-    payload = f"{provider_name}:{model_name}:{text}".encode("utf-8")
+def make_embedding_key(provider_name: str, model_name: str, text_hash: str) -> str:
+    payload = f"{provider_name}:{model_name}:{text_hash}".encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
 

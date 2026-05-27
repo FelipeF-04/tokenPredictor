@@ -39,6 +39,16 @@
   margin-bottom: 8px;
 }
 
+.ai-select {
+  border: 1px solid var(--ai-border);
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-size: 12px;
+  background: #ffffff;
+  color: var(--ai-ink);
+  min-width: 120px;
+}
+
 .ai-meter {
   height: 8px;
   background: #e2e8f0;
@@ -128,6 +138,12 @@
   font-size: 12px;
   font-weight: 700;
   margin-bottom: 6px;
+}
+
+.ai-usage-model {
+  font-size: 10px;
+  margin-bottom: 6px;
+  color: var(--ai-muted);
 }
 
 .ai-usage-row {

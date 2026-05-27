@@ -63,8 +63,10 @@ The popup gives you the same idea at a session level, so you can see how the con
 
 ## Configuration
 
-- Backend thresholds and window size live in [shared/config.json](shared/config.json).
-- Popup thresholds are currently defined in [extension/popup.js](extension/popup.js). Keep these aligned with the shared config when you change window sizes or risk levels.
+- Shared config lives in [shared/config.json](shared/config.json).
+- The backend serves config via `GET /config` and the extension consumes it at startup.
+- If the backend is unavailable, the extension falls back to its bundled copy at [extension/shared/config.json](extension/shared/config.json).
+- Model profile defaults, risk thresholds, and token window are sourced from config to keep backend + UI synchronized.
 
 ## Run it locally (optional)
 
@@ -98,12 +100,16 @@ python backend/test_backend.py
 
 ## API endpoints (local)
 
+- `GET /config` - Returns shared config values used by the extension.
+- `GET /models` - Returns available model profiles and context windows.
+- `GET /session/<id>` - Fetches the durable session state.
+- `POST /session/<id>/reset` - Resets a durable session.
 - `POST /analyze` - Returns input tokens, predicted output tokens, projected total, and risk.
-- `POST /commit` - Adds the projected total to the session counter.
-- `POST /reset` - Resets the backend session total.
+- `POST /commit` - Adds token deltas to a durable session.
+- `POST /optimize` - Runs the optimization pipeline for a session.
 
 ## Notes and constraints
 
 - The backend must be running at `http://localhost:5000` for live updates.
-- Backend session totals reset when the server restarts.
+- Backend session totals persist locally in SQLite and recover after restarts.
 - Output prediction uses heuristics, so treat it as an estimate, not an exact count.

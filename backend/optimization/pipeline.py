@@ -1,12 +1,16 @@
+import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
 from tokenizer import count_tokens
 
+from config import load_config
 from .budget_manager import compute_budget
 from .compression import select_chunks_for_budget
 from .deduplication import deduplicate_chunks
-from .embeddings import EmbeddingCache, EmbeddingProviderFactory, make_embedding_key
+from .cache.embedding_cache import EmbeddingCache, EmbeddingStore
+from .embeddings import EmbeddingProviderFactory, hash_text, make_embedding_key
+from .incremental.chunking import IncrementalChunker
 from .instruction_extractor import InstructionExtractor
 from .memory_manager import MemoryManager, SessionStore
 from .models import (
@@ -25,39 +29,50 @@ from .models import (
     trace_to_dict,
 )
 from .optimizer_metrics import build_metrics
+from .profiling.timer import PipelineProfiler
 from .relevance import score_chunks_embedding, score_chunks_hybrid, score_chunks_lexical
 from .semantic_chunker import SemanticChunker
 from .strategies import auto_strategy, get_strategy
 from .validator import validate_preservation
 
 
+logger = logging.getLogger(__name__)
+
+
 class OptimizationPipeline:
     def __init__(
         self,
         session_store: Optional[SessionStore] = None,
-        embedding_cache: Optional[EmbeddingCache] = None,
+        embedding_store: Optional[EmbeddingStore] = None,
         config: Optional[PipelineConfig] = None,
     ) -> None:
         self.session_store = session_store or SessionStore()
-        self.embedding_cache = embedding_cache or EmbeddingCache()
+        self.embedding_store = embedding_store or EmbeddingStore()
+        self.instruction_cache = EmbeddingCache()
         self.config = config or PipelineConfig()
+        self.app_config = load_config()
         self.chunker = SemanticChunker(
             max_tokens=self.config.max_chunk_tokens,
             overlap_tokens=self.config.chunk_overlap_tokens,
         )
+        self.incremental_chunker = IncrementalChunker(self.chunker)
         self.memory_manager = MemoryManager()
         self.model_profiles = default_model_profiles()
 
     def optimize(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        messages = self._parse_messages(payload.get("messages"))
+        profiler = PipelineProfiler()
+        with profiler.track("parse"):
+            messages = self._parse_messages(payload.get("messages"))
         if not messages:
             raise ValueError("messages must be a non-empty list")
 
         session_id = str(payload.get("session_id") or uuid.uuid4())
-        model_profile_name = payload.get("model_profile", "gpt-4o-mini")
+        model_profile_name = payload.get("model_profile") or self.app_config.default_model_profile
         strategy_name = payload.get("strategy", "auto")
         retrieval_mode = payload.get("retrieval_mode", "embedding")
         options = payload.get("options", {})
+        if not isinstance(options, dict):
+            options = {}
         query_text = payload.get("query") or self._infer_query(messages)
 
         embedding_provider_name = payload.get("embedding_provider", "sentence-transformers")
@@ -70,24 +85,31 @@ class OptimizationPipeline:
         session = self.session_store.get_or_create(session_id)
         trace = OptimizationTrace(session_id=session_id, strategy=strategy_name)
 
-        chunks = self.chunker.chunk_messages(messages)
+        with profiler.track("chunking"):
+            chunks, reuse_stats = self.incremental_chunker.build_chunks(session, messages)
         self.session_store.update_chunks(session, chunks)
 
         provider = EmbeddingProviderFactory.get_provider(
             embedding_provider_name, embedding_model_name, self.config.deterministic
         )
-        embeddings = self._embed_chunks(provider, session, chunks)
+        with profiler.track("embeddings"):
+            embeddings, embedding_stats = self._embed_chunks(provider, session_id, chunks)
 
         instruction_extractor = InstructionExtractor(
             provider,
-            self.embedding_cache,
+            self.instruction_cache,
             similarity_threshold=self.config.instruction_similarity_threshold,
         )
         chunk_tuples = [(chunk.chunk_id, chunk.text) for chunk in chunks]
-        instructions = instruction_extractor.extract(chunk_tuples, trace.events)
-        self.session_store.update_instructions(session, instructions)
+        chunks_changed = reuse_stats.messages_reused < reuse_stats.messages_total
+        if chunks_changed or not session.instructions:
+            instructions = instruction_extractor.extract(chunk_tuples, trace.events)
+            self.session_store.update_instructions(session, instructions)
+        else:
+            instructions = list(session.instructions.values())
 
-        query_embedding = self._embed_query(provider, query_text, session)
+        with profiler.track("query_embedding"):
+            query_embedding, query_reused = self._embed_query(provider, query_text, session_id)
         if retrieval_mode == "lexical":
             score_chunks_lexical(query_text, chunks, trace.events)
         elif retrieval_mode == "hybrid":
@@ -191,6 +213,22 @@ class OptimizationPipeline:
         )
         metrics = build_metrics(original_tokens, optimized_tokens, validation)
 
+        embedding_total = embedding_stats.get("total", 0)
+        embedding_reused = embedding_stats.get("reused", 0)
+        embedding_reuse_pct = (embedding_reused / embedding_total) if embedding_total else 0.0
+        query_embedding_reused = 1.0 if query_reused else 0.0
+        chunk_reuse_pct = reuse_stats.chunk_reuse_rate()
+        profiling = {
+            **profiler.to_dict(),
+            "embedding_hit_rate": embedding_stats.get("hit_rate", 0.0),
+            "embedding_reuse_pct": embedding_reuse_pct,
+            "embedding_session_hits": embedding_stats.get("session_hits", 0),
+            "embedding_global_hits": embedding_stats.get("global_hits", 0),
+            "embedding_misses": embedding_stats.get("misses", 0),
+            "query_embedding_reused": query_embedding_reused,
+            "chunk_reuse_pct": chunk_reuse_pct,
+        }
+
         trace.summary = {
             "original_tokens": original_tokens,
             "optimized_tokens": optimized_tokens,
@@ -206,6 +244,7 @@ class OptimizationPipeline:
             "model_profile": profile.name,
             "strategy": strategy.name,
             "deterministic": self.config.deterministic,
+            "profiling": profiling,
             "stats": {
                 "total_chunks": len(chunks),
                 "kept_chunks": len(selected_chunks),
@@ -237,6 +276,8 @@ class OptimizationPipeline:
         if options.get("include_removed_chunks", False):
             all_removed = [chunk for chunk in chunks if chunk.removed]
             response["removed_chunks"] = [chunk_to_dict(chunk) for chunk in all_removed]
+        if self.app_config.debug.pipeline:
+            logger.info("Optimization profiling", extra={"profiling": profiling})
 
         return response
 
@@ -264,42 +305,64 @@ class OptimizationPipeline:
                 return message.content
         return messages[-1].content if messages else ""
 
-    def _embed_chunks(self, provider, session, chunks: List[Chunk]) -> Dict[str, List[float]]:
+    def _embed_chunks(
+        self, provider, session_id: str, chunks: List[Chunk]
+    ) -> (Dict[str, List[float]], Dict[str, float]):
         embeddings: Dict[str, List[float]] = {}
         missing_texts: List[str] = []
         missing_keys: List[str] = []
+        reused = 0
+        session_hits = 0
+        global_hits = 0
 
         for chunk in chunks:
-            key = make_embedding_key(provider.name, provider.model_name, chunk.text)
+            chunk_hash = hash_text(chunk.text)
+            key = make_embedding_key(provider.name, provider.model_name, chunk_hash)
             chunk.embedding_key = key
-            cached = self.embedding_cache.get(key) or session.embeddings.get(key)
+            cached, source = self.embedding_store.get(session_id, key)
             if cached is None:
                 missing_texts.append(chunk.text)
                 missing_keys.append(key)
             else:
                 embeddings[key] = cached
+                reused += 1
+                if source == "session":
+                    session_hits += 1
+                elif source == "global":
+                    global_hits += 1
 
         if missing_texts:
             computed = provider.embed_texts(missing_texts)
             for idx, vector in enumerate(computed):
                 key = missing_keys[idx]
-                self.embedding_cache.set(key, vector)
-                session.embeddings[key] = vector
+                self.embedding_store.set(session_id, key, vector)
                 embeddings[key] = vector
 
-        return embeddings
+        total = len(chunks)
+        misses = total - reused
+        hit_rate = (reused / total) if total else 0.0
+        stats = {
+            "total": len(chunks),
+            "reused": reused,
+            "misses": misses,
+            "session_hits": session_hits,
+            "global_hits": global_hits,
+            "hit_rate": hit_rate,
+        }
+        return embeddings, stats
 
-    def _embed_query(self, provider, query_text: str, session) -> List[float]:
+    def _embed_query(self, provider, query_text: str, session_id: str) -> (List[float], bool):
         if not query_text:
-            return []
-        key = make_embedding_key(provider.name, provider.model_name, query_text)
-        cached = self.embedding_cache.get(key) or session.embeddings.get(key)
+            return [], False
+        key = make_embedding_key(
+            provider.name, provider.model_name, hash_text(query_text)
+        )
+        cached, _source = self.embedding_store.get(session_id, key)
         if cached is not None:
-            return cached
+            return cached, True
         embedding = provider.embed_texts([query_text])[0]
-        self.embedding_cache.set(key, embedding)
-        session.embeddings[key] = embedding
-        return embedding
+        self.embedding_store.set(session_id, key, embedding)
+        return embedding, False
 
     def _select_instructions(self, instructions: List, budget_tokens: int) -> List[str]:
         included: List[str] = []

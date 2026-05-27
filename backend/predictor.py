@@ -1,7 +1,7 @@
-import json
 import math
 import re
-from pathlib import Path
+
+from config import load_config
 
 DEFAULT_MULTIPLIER = 1.5
 CODE_MULTIPLIER = 1.8
@@ -14,22 +14,7 @@ _CODE_PATTERN = re.compile(
 )
 
 
-def _load_config():
-    config_path = Path(__file__).resolve().parents[1] / "shared" / "config.json"
-    if not config_path.exists():
-        return {}
-    try:
-        return json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-_config = _load_config()
-
-TOKEN_WINDOW = int(_config.get("token_window", 8000))
-RISK_YELLOW = float(_config.get("risk_thresholds", {}).get("yellow", 0.6))
-RISK_RED = float(_config.get("risk_thresholds", {}).get("red", 0.85))
-OUTPUT_ESTIMATE_MIN_TOKENS = int(_config.get("output_estimate_min_tokens", 30))
+_config = load_config()
 
 
 def pick_multiplier(message, input_tokens):
@@ -43,18 +28,24 @@ def pick_multiplier(message, input_tokens):
 def predict_output_tokens(message, input_tokens):
     if input_tokens <= 0:
         return 0
-    if OUTPUT_ESTIMATE_MIN_TOKENS > 0 and input_tokens < OUTPUT_ESTIMATE_MIN_TOKENS:
+    min_tokens = _config.output_estimate_min_tokens
+    if min_tokens > 0 and input_tokens < min_tokens:
         return 0
     multiplier = pick_multiplier(message, input_tokens)
     return int(math.ceil(input_tokens * multiplier))
 
 
-def risk_level(current_session_tokens, projected_total_tokens):
-    if TOKEN_WINDOW <= 0:
+def risk_level(current_session_tokens, projected_total_tokens, token_window=None, thresholds=None):
+    config = _config
+    if token_window is None:
+        token_window = config.token_window
+    if thresholds is None:
+        thresholds = config.risk_thresholds
+    if token_window <= 0:
         return "red"
-    risk_score = (current_session_tokens + projected_total_tokens) / TOKEN_WINDOW
-    if risk_score >= RISK_RED:
+    risk_score = (current_session_tokens + projected_total_tokens) / token_window
+    if risk_score >= thresholds.red:
         return "red"
-    if risk_score >= RISK_YELLOW:
+    if risk_score >= thresholds.yellow:
         return "yellow"
     return "green"

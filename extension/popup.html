@@ -10,6 +10,14 @@
     <div class="ai-card">
       <div class="ai-title">AI Usage Predictor</div>
       <div class="ai-row">
+        <span>Model</span>
+        <select id="modelSelect" class="ai-select"></select>
+      </div>
+      <div class="ai-row">
+        <span>Context window</span>
+        <span id="contextWindow">-</span>
+      </div>
+      <div class="ai-row">
         <span>Session tokens</span>
         <span id="sessionTokens">0</span>
       </div>
@@ -20,6 +28,7 @@
       <button class="ai-button" id="resetBtn">Reset session</button>
       <div class="ai-note" id="statusText"></div>
     </div>
+    <script src="shared/api.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>
