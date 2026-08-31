@@ -1,0 +1,13 @@
+{
+  "name": "ai-usage-predictor-tests",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline browser validation for the AI Usage Predictor extension",
+  "scripts": {
+    "test:extension": "node --test extension/tests/*.test.js",
+    "test:e2e": "python scripts/run_e2e.py"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.60.0"
+  }
+}

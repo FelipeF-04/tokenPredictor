@@ -86,6 +86,9 @@ The popup gives you the same idea at a session level, so you can see how the con
 - [extension/popup.html](extension/popup.html) - Popup layout.
 - [extension/popup.js](extension/popup.js) - Popup logic + reset action.
 - [extension/tests/](extension/tests/) - Node tests and ChatGPT DOM compatibility fixtures.
+- [e2e/](e2e/) - Local mock ChatGPT page and Playwright browser scenarios.
+- [scripts/run_e2e.py](scripts/run_e2e.py) - Isolated browser-test backend orchestration and cleanup.
+- [scripts/package_extension.py](scripts/package_extension.py) - Clean release ZIP builder.
 - [shared/config.json](shared/config.json) - Token window and thresholds.
 
 ## Configuration
@@ -128,19 +131,29 @@ AI_USAGE_ENV=development python backend/app.py
 
 4. Open ChatGPT or a compatible page and type a message. A floating widget should appear.
 
-5. Run the complete test suite:
+5. Run the complete fast unit and compatibility suite:
 
 ```bash
 python run_tests.py
 ```
 
-That single command runs the complete Python backend and JavaScript extension test suite. Node.js must be installed for the extension tests.
+That single command runs the Python backend tests, Node extension tests, JavaScript syntax checks, and Manifest V3 validation. Node.js must be installed for the extension tests.
 
 The runner sets Hugging Face and Transformers offline flags, uses fake tokenization and embeddings, checks every extension JavaScript file with `node --check`, and validates the MV3 manifest. It does not download tokenizer encodings or embedding models.
 
+6. Install and run the isolated browser E2E suite:
+
+```bash
+npm install
+npx playwright install chromium
+python scripts/run_e2e.py
+```
+
+The E2E runner starts a test-only Flask process on `127.0.0.1:5000`, creates a temporary SQLite database, injects fake tokenization and embeddings, launches the unpacked MV3 extension in Chromium, and always terminates its child processes. Browser requests for the supported ChatGPT URL are fulfilled from [e2e/fixtures/mock_chatgpt.html](e2e/fixtures/mock_chatgpt.html); all non-loopback external traffic is blocked. The temporary database is removed after the run.
+
 ## Continuous integration
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) runs for every pull request and every push to `main`. CI tests Python 3.11 and 3.13 with Node.js 22, caches pip downloads, installs the declared Python dependencies, and runs:
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs for every pull request and every push to `main`. Its fast matrix tests Python 3.11 and 3.13 with Node.js 22, caches pip downloads, installs the declared Python dependencies, and runs:
 
 - The complete offline suite through `python run_tests.py`.
 - The extension Node tests as an explicit guardrail.
@@ -148,6 +161,8 @@ The runner sets Hugging Face and Transformers offline flags, uses fake tokenizat
 - JSON and Manifest V3 validation for `extension/manifest.json`.
 
 Offline environment flags make accidental sentence-transformers model access fail instead of downloading a model. API and optimization tests inject fake encoders and embedding providers, so CI does not need a populated local model cache.
+
+A separate Chromium E2E job installs the pinned Playwright dependency, caches its browser binaries, and runs `python scripts/run_e2e.py` with a longer timeout. Playwright traces, screenshots, and the HTML report are uploaded only when that job fails. Neither CI job uses secrets or contacts the live ChatGPT service.
 
 ## Updating ChatGPT DOM compatibility
 
@@ -169,7 +184,7 @@ Running `python backend/app.py` with no environment variables uses production-sa
 AI_USAGE_ALLOWED_ORIGINS=chrome-extension://<extension-id>
 ```
 
-`AI_USAGE_ENV=development` allows loopback web origins and syntactically valid unpacked Chrome extension origins. Debug mode remains off unless `AI_USAGE_DEBUG=1` is also set. `AI_USAGE_PORT` changes the port; `AI_USAGE_HOST` can change the bind address, but exposing the backend beyond loopback is not recommended.
+`AI_USAGE_ENV=development` allows loopback web origins and syntactically valid unpacked Chrome extension origins. Debug mode remains off unless `AI_USAGE_DEBUG=1` is also set. `AI_USAGE_PORT` changes the port; `AI_USAGE_HOST` can change the bind address, but exposing the backend beyond loopback is not recommended. `AI_USAGE_STORAGE_PATH` can select an alternate SQLite file and is used by the isolated E2E runner.
 
 The server caps request bodies at 1 MiB and both `/analyze` messages and `/events` text at 100,000 characters. Operational error logs contain structured status, route, method, and exception type fields but never request payloads.
 
@@ -196,3 +211,21 @@ The server caps request bodies at 1 MiB and both `/analyze` messages and `/event
 - SQLite files, Python/Node caches, virtual environments, and downloaded model artifacts are ignored and should remain local.
 - The backend has no authentication or TLS. Its security model assumes a trusted local machine, a loopback bind, and an explicitly restricted extension-origin allowlist.
 - CORS is a browser boundary, not authentication. Local processes can still call the loopback API, and the SQLite session database is not encrypted.
+
+## Packaging and release checklist
+
+Create a deterministic runtime-only ZIP with:
+
+```bash
+python scripts/package_extension.py
+```
+
+The package is written to `dist/ai-usage-predictor-<version>.zip`. It contains the extension manifest and runtime sources at the ZIP root, while excluding tests, caches, source maps, logs, local override files such as `config.local.json`, and development artifacts. ZIP files and Playwright output directories are ignored by Git.
+
+Before releasing:
+
+- Run `python run_tests.py` and `python scripts/run_e2e.py` successfully.
+- Manually load the unpacked extension and test typing, sending, streaming completion, reload/navigation, optimization, and popup totals on both `https://chatgpt.com` and `https://chat.openai.com`.
+- Verify production startup still binds to `127.0.0.1`, debug mode is off, and `AI_USAGE_ALLOWED_ORIGINS` contains only the intended extension origin.
+- Increment `version` in [extension/manifest.json](extension/manifest.json).
+- Run `python scripts/package_extension.py`, inspect the ZIP contents, and confirm it contains no tests, databases, caches, model files, local overrides, or browser-test artifacts.

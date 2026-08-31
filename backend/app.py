@@ -27,7 +27,9 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
 
 _config = load_config()
 _pipeline = OptimizationPipeline()
-_storage_path = Path(_config.backend.storage_path)
+_storage_path = Path(
+    os.environ.get("AI_USAGE_STORAGE_PATH") or _config.backend.storage_path
+)
 if not _storage_path.is_absolute():
     _storage_path = Path(__file__).resolve().parents[1] / _storage_path
 

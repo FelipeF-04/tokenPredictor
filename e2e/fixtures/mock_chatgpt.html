@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Local Mock ChatGPT</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        min-height: 100vh;
+        margin: 0;
+        background: #f7f7f8;
+        color: #202123;
+        font-family: Arial, sans-serif;
+      }
+      header, main, .controls, form {
+        width: min(720px, calc(100% - 32px));
+        margin-inline: auto;
+      }
+      header { padding: 18px 0 8px; }
+      main { min-height: 360px; padding-bottom: 170px; }
+      article {
+        margin: 12px 0;
+        padding: 14px;
+        border: 1px solid #d9d9e3;
+        border-radius: 10px;
+        background: white;
+      }
+      article[data-is-streaming="true"] { border-color: #f59f00; }
+      .controls {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        z-index: 1;
+        display: flex;
+        width: auto;
+        gap: 8px;
+      }
+      form {
+        position: fixed;
+        right: 0;
+        bottom: 18px;
+        left: 0;
+        display: flex;
+        gap: 8px;
+        padding: 12px;
+        border: 1px solid #c5c5d2;
+        border-radius: 12px;
+        background: white;
+      }
+      #prompt-textarea {
+        min-height: 48px;
+        flex: 1;
+        padding: 12px;
+        border: 1px solid #aaa;
+        border-radius: 8px;
+        background: white;
+      }
+      button { min-height: 36px; padding: 6px 12px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>Local deterministic ChatGPT fixture</strong>
+    </header>
+    <main id="transcript" aria-live="polite"></main>
+    <div class="controls">
+      <button id="duplicate" type="button">Duplicate last response</button>
+      <button id="navigate" type="button">Navigate conversation</button>
+    </div>
+    <form id="composer-form">
+      <div
+        id="prompt-textarea"
+        contenteditable="true"
+        data-placeholder="Message ChatGPT"
+        role="textbox"
+        aria-label="Message ChatGPT"
+      ></div>
+      <button type="submit" data-testid="send-button" aria-label="Send prompt">Send</button>
+    </form>
+    <script>
+      (() => {
+        const transcript = document.getElementById("transcript");
+        const composer = document.getElementById("prompt-textarea");
+        const form = document.getElementById("composer-form");
+
+        function storageKey() {
+          return `mock-chat:${window.location.pathname}`;
+        }
+
+        function loadMessages() {
+          try {
+            return JSON.parse(localStorage.getItem(storageKey()) || "[]");
+          } catch (_error) {
+            return [];
+          }
+        }
+
+        function saveMessages(messages) {
+          localStorage.setItem(storageKey(), JSON.stringify(messages));
+        }
+
+        function createTurn(message) {
+          const article = document.createElement("article");
+          article.dataset.testid = `conversation-turn-${message.turn}`;
+          article.dataset.messageId = message.id;
+          const body = document.createElement("div");
+          body.dataset.messageAuthorRole = message.role;
+          body.textContent = message.content;
+          article.appendChild(body);
+          return article;
+        }
+
+        function render() {
+          transcript.replaceChildren(...loadMessages().map(createTurn));
+        }
+
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          const text = composer.textContent.trim();
+          if (!text) return;
+
+          const pathAtSend = window.location.pathname;
+          const messages = loadMessages();
+          const userTurn = messages.length + 1;
+          messages.push({
+            turn: userTurn,
+            id: `user-${userTurn}`,
+            role: "user",
+            content: text,
+          });
+          saveMessages(messages);
+          composer.textContent = "";
+          render();
+
+          const assistantTurn = userTurn + 1;
+          const assistant = createTurn({
+            turn: assistantTurn,
+            id: `assistant-${assistantTurn}`,
+            role: "assistant",
+            content: "Stable",
+          });
+          assistant.dataset.isStreaming = "true";
+          assistant.setAttribute("aria-busy", "true");
+          transcript.appendChild(assistant);
+
+          const stop = document.createElement("button");
+          stop.type = "button";
+          stop.dataset.testid = "stop-button";
+          stop.setAttribute("aria-label", "Stop generating");
+          stop.textContent = "Stop";
+          form.appendChild(stop);
+
+          window.setTimeout(() => {
+            if (window.location.pathname !== pathAtSend) return;
+            assistant.querySelector("[data-message-author-role]").textContent =
+              "Stable assistant";
+          }, 100);
+
+          window.setTimeout(() => {
+            if (window.location.pathname !== pathAtSend) return;
+            const finalText = "Stable assistant reply";
+            assistant.querySelector("[data-message-author-role]").textContent = finalText;
+            assistant.removeAttribute("data-is-streaming");
+            assistant.removeAttribute("aria-busy");
+            stop.remove();
+            messages.push({
+              turn: assistantTurn,
+              id: `assistant-${assistantTurn}`,
+              role: "assistant",
+              content: finalText,
+            });
+            saveMessages(messages);
+          }, 250);
+        });
+
+        document.getElementById("duplicate").addEventListener("click", () => {
+          const assistant = Array.from(
+            transcript.querySelectorAll("[data-message-author-role='assistant']")
+          ).at(-1)?.closest("article");
+          if (assistant) transcript.appendChild(assistant.cloneNode(true));
+        });
+
+        document.getElementById("navigate").addEventListener("click", () => {
+          history.pushState({}, "", "/e2e/next-conversation");
+          composer.textContent = "";
+          render();
+        });
+
+        render();
+      })();
+    </script>
+  </body>
+</html>

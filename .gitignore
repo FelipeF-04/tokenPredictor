@@ -29,6 +29,10 @@ yarn-error.log*
 .nyc_output/
 coverage/
 dist/
+*.zip
+playwright-report/
+test-results/
+.playwright/
 
 # Downloaded model artifacts and caches
 models/
