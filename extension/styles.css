@@ -118,7 +118,8 @@
 
 .ai-usage-widget {
   position: absolute;
-  min-width: 180px;
+  min-width: 230px;
+  max-width: 320px;
   background: var(--ai-card);
   border: 1px solid var(--ai-border);
   border-left: 4px solid var(--ai-green);
@@ -153,6 +154,11 @@
   margin-bottom: 4px;
 }
 
+.ai-usage-row span:last-child {
+  margin-left: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .ai-usage-badge {
   display: inline-block;
   padding: 2px 6px;
@@ -178,6 +184,61 @@
   background: rgba(224, 49, 49, 0.12);
   color: var(--ai-red);
   border-left-color: var(--ai-red);
+}
+
+.ai-usage-status {
+  margin-top: 6px;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--ai-muted);
+}
+
+.ai-usage-optimize {
+  margin-top: 8px;
+  width: 100%;
+  border: 1px solid #0f172a;
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: #0f172a;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ai-usage-optimize:hover:not(:disabled) {
+  background: #1e293b;
+}
+
+.ai-usage-optimize:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.ai-usage-optimize:focus-visible,
+.ai-usage-toggle:focus-visible,
+.ai-usage-apply:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.ai-usage-optimization {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--ai-border);
+}
+
+.ai-usage-optimization[hidden],
+.ai-usage-row[hidden] {
+  display: none;
+}
+
+.ai-usage-section-title {
+  margin-bottom: 6px;
+  color: var(--ai-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
 }
 
 .ai-usage-toggle {

@@ -3,9 +3,18 @@ import unittest
 from optimization.incremental.chunking import IncrementalChunker
 from optimization.models import Message, SessionState
 from optimization.semantic_chunker import SemanticChunker
+from tokenizer import set_encoding
+
+
+class FakeEncoding:
+    def encode(self, text):
+        return text.split()
 
 
 class IncrementalChunkingTests(unittest.TestCase):
+    def setUp(self):
+        set_encoding(FakeEncoding())
+
     def test_reuse_stats(self):
         session = SessionState(session_id="s1")
         chunker = IncrementalChunker(SemanticChunker(max_tokens=200, overlap_tokens=0))

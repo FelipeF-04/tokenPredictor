@@ -126,10 +126,17 @@ async function postJSON(url, payload) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload || {}),
   });
-  if (!response.ok) {
-    throw new Error("Backend error");
+  let data = null;
+  try {
+    data = await response.json();
+  } catch (error) {
+    data = null;
   }
-  return response.json();
+  if (!response.ok) {
+    const backendMessage = data && typeof data.error === "string" ? data.error : null;
+    throw new Error(backendMessage || `Backend request failed (${response.status})`);
+  }
+  return data;
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {

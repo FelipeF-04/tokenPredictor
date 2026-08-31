@@ -5,10 +5,12 @@ from flask import Flask, jsonify, request
 from config import load_config
 from predictor import predict_output_tokens, risk_level
 from storage import SessionStore
-from tokenizer import count_tokens
+from tokenizer import TokenizerUnavailableError, count_tokens
 from optimization.pipeline import OptimizationPipeline
 
 app = Flask(__name__)
+
+MAX_ANALYZE_MESSAGE_CHARS = 100_000
 
 _config = load_config()
 _pipeline = OptimizationPipeline()
@@ -24,6 +26,13 @@ _session_store = SessionStore(
 def _json_error(message, status=400):
     response = jsonify({"error": message})
     return response, status
+
+
+def _json_object():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return None, _json_error("request body must be a JSON object")
+    return data, None
 
 
 @app.after_request
@@ -51,10 +60,18 @@ def analyze():
     if request.method == "OPTIONS":
         return _handle_options()
 
-    data = request.get_json(silent=True) or {}
+    data, error = _json_object()
+    if error:
+        return error
+
     message = data.get("message", "")
     if not isinstance(message, str):
         return _json_error("message must be a string")
+    if len(message) > MAX_ANALYZE_MESSAGE_CHARS:
+        return _json_error(
+            f"message must be at most {MAX_ANALYZE_MESSAGE_CHARS} characters",
+            status=413,
+        )
 
     session_id = data.get("session_id")
     model_profile = data.get("model_profile")
@@ -65,13 +82,27 @@ def analyze():
 
     session = _session_store.get_or_create(session_id, model_profile)
 
-    input_tokens = count_tokens(message)
+    try:
+        input_tokens = count_tokens(message)
+    except TokenizerUnavailableError as exc:
+        return _json_error(str(exc), status=503)
+
     predicted_output_tokens = predict_output_tokens(message, input_tokens)
     projected_total_tokens = input_tokens + predicted_output_tokens
+    context_window = profile.context_window or _config.token_window
+    reserved_output_tokens = min(max(profile.max_output_tokens, 0), context_window)
+    projected_session_tokens = session.total_tokens + projected_total_tokens
+    available_context_tokens = max(
+        context_window - reserved_output_tokens - session.total_tokens - input_tokens,
+        0,
+    )
+    utilization_ratio = (
+        projected_session_tokens / context_window if context_window > 0 else 1.0
+    )
     risk = risk_level(
         session.total_tokens,
         projected_total_tokens,
-        token_window=profile.context_window or _config.token_window,
+        token_window=context_window,
     )
 
     return jsonify(
@@ -82,6 +113,10 @@ def analyze():
             "risk_level": risk,
             "session_id": session.session_id,
             "session_tokens": session.total_tokens,
+            "context_window": context_window,
+            "reserved_output_tokens": reserved_output_tokens,
+            "available_context_tokens": available_context_tokens,
+            "utilization_ratio": utilization_ratio,
         }
     )
 
@@ -140,6 +175,8 @@ def optimize():
             )
     except ValueError as exc:
         return _json_error(str(exc))
+    except TokenizerUnavailableError as exc:
+        return _json_error(str(exc), status=503)
     except Exception:
         return _json_error("optimization failed", status=500)
 

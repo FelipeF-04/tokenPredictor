@@ -5,7 +5,7 @@ const STORAGE_KEYS = {
   modelProfile: "aiUsageModelProfile",
 };
 
-const OPTIMIZE_DEBOUNCE_MS = 500;
+const ANALYZE_DEBOUNCE_MS = 300;
 const DEFAULT_STRATEGY = "auto";
 const DEFAULT_RETRIEVAL_MODE = "embedding";
 const DEFAULT_EMBEDDING_PROVIDER = "sentence-transformers";
@@ -22,8 +22,9 @@ const DEFAULT_CONFIG = {
 };
 
 let activeInput = null;
-let analysisState = null;
-let debounceId = null;
+let liveEstimateState = null;
+let optimizationState = null;
+let optimizationMessage = "";
 let lastCommittedText = "";
 let ui = null;
 let previewVisible = false;
@@ -33,10 +34,10 @@ let config = DEFAULT_CONFIG;
 let domObserver = null;
 let domFailures = 0;
 let currentConversationKey = null;
+let contentController = null;
 
 function logDebug(message, details) {
   if (config?.debug?.dom) {
-    // eslint-disable-next-line no-console
     console.debug("[AI Usage Predictor]", message, details || "");
   }
 }
@@ -61,11 +62,7 @@ function storageSet(payload) {
 
 async function loadConfig() {
   const response = await AIUsageAPI.getConfig();
-  if (response && response.success) {
-    config = response.data;
-    return config;
-  }
-  config = DEFAULT_CONFIG;
+  config = response && response.success ? response.data : DEFAULT_CONFIG;
   return config;
 }
 
@@ -104,8 +101,11 @@ async function resolveSessionId() {
 async function ensureConversationSession() {
   const conversationKey = getConversationKey();
   if (conversationKey !== currentConversationKey) {
+    contentController.invalidateLive();
     await resolveSessionId();
-    analysisState = null;
+    liveEstimateState = null;
+    optimizationState = null;
+    optimizationMessage = "";
     lastCommittedText = "";
     setWidgetHidden();
   }
@@ -116,42 +116,66 @@ function ensureWidget() {
     return ui;
   }
 
-  const widget = document.createElement("div");
+  const widget = document.createElement("aside");
   widget.id = "ai-usage-widget";
   widget.className = "ai-usage-widget ai-usage-hidden";
+  widget.setAttribute("aria-label", "AI usage estimate");
   widget.innerHTML = `
-    <div class="ai-usage-title">Context Optimization</div>
+    <div class="ai-usage-title">AI Usage Predictor</div>
     <div class="ai-usage-model" id="ai-usage-model">Model: -</div>
-    <div class="ai-usage-row"><span>Original</span><span id="ai-usage-original">-</span></div>
-    <div class="ai-usage-row"><span>Optimized</span><span id="ai-usage-optimized">-</span></div>
-    <div class="ai-usage-row"><span>Savings</span><span id="ai-usage-savings">-</span></div>
-    <div class="ai-usage-row"><span>Chunks kept</span><span id="ai-usage-chunks">-</span></div>
-    <div class="ai-usage-badge ai-usage-badge--green" id="ai-usage-confidence">confidence</div>
-    <button class="ai-usage-toggle" id="ai-usage-toggle" type="button">Show packed prompt</button>
-    <button class="ai-usage-apply" id="ai-usage-apply" type="button" disabled>Apply optimized prompt</button>
-    <div class="ai-usage-preview ai-usage-preview--hidden" id="ai-usage-preview">
-      <div class="ai-usage-preview-title">Packed prompt</div>
-      <pre class="ai-usage-preview-body" id="ai-usage-preview-body"></pre>
+    <div class="ai-usage-row"><span>Input tokens</span><span id="ai-usage-input">-</span></div>
+    <div class="ai-usage-row"><span>Estimated output</span><span id="ai-usage-output">-</span></div>
+    <div class="ai-usage-row"><span>Projected session total</span><span id="ai-usage-projected">-</span></div>
+    <div class="ai-usage-row" id="ai-usage-available-row" hidden>
+      <span>Available context</span><span id="ai-usage-available">-</span>
     </div>
-    <div class="ai-usage-error" id="ai-usage-error"></div>
+    <div class="ai-usage-badge ai-usage-badge--green" id="ai-usage-risk" role="status" aria-live="polite">Risk: -</div>
+    <div class="ai-usage-status" id="ai-usage-live-status" role="status" aria-live="polite"></div>
+    <button class="ai-usage-optimize" id="ai-usage-optimize" type="button" disabled>Optimize context</button>
+    <div class="ai-usage-optimization" id="ai-usage-optimization" hidden>
+      <div class="ai-usage-section-title">Context optimization</div>
+      <div class="ai-usage-row"><span>Original</span><span id="ai-usage-original">-</span></div>
+      <div class="ai-usage-row"><span>Optimized</span><span id="ai-usage-optimized">-</span></div>
+      <div class="ai-usage-row"><span>Savings</span><span id="ai-usage-savings">-</span></div>
+      <div class="ai-usage-row"><span>Chunks kept</span><span id="ai-usage-chunks">-</span></div>
+      <div class="ai-usage-badge ai-usage-badge--green" id="ai-usage-confidence">Confidence: -</div>
+      <button class="ai-usage-toggle" id="ai-usage-toggle" type="button">Show packed prompt</button>
+      <button class="ai-usage-apply" id="ai-usage-apply" type="button" disabled>Apply optimized prompt</button>
+      <div class="ai-usage-preview ai-usage-preview--hidden" id="ai-usage-preview">
+        <div class="ai-usage-preview-title">Packed prompt</div>
+        <pre class="ai-usage-preview-body" id="ai-usage-preview-body"></pre>
+      </div>
+    </div>
+    <div class="ai-usage-error" id="ai-usage-optimization-error" role="status" aria-live="assertive"></div>
   `;
 
   document.body.appendChild(widget);
 
   ui = {
     widget,
+    inputEl: widget.querySelector("#ai-usage-input"),
+    outputEl: widget.querySelector("#ai-usage-output"),
+    projectedEl: widget.querySelector("#ai-usage-projected"),
+    availableRowEl: widget.querySelector("#ai-usage-available-row"),
+    availableEl: widget.querySelector("#ai-usage-available"),
+    riskEl: widget.querySelector("#ai-usage-risk"),
+    liveStatusEl: widget.querySelector("#ai-usage-live-status"),
+    modelEl: widget.querySelector("#ai-usage-model"),
+    optimizeEl: widget.querySelector("#ai-usage-optimize"),
+    optimizationEl: widget.querySelector("#ai-usage-optimization"),
     originalEl: widget.querySelector("#ai-usage-original"),
     optimizedEl: widget.querySelector("#ai-usage-optimized"),
     savingsEl: widget.querySelector("#ai-usage-savings"),
     chunksEl: widget.querySelector("#ai-usage-chunks"),
-    badgeEl: widget.querySelector("#ai-usage-confidence"),
-    modelEl: widget.querySelector("#ai-usage-model"),
+    confidenceEl: widget.querySelector("#ai-usage-confidence"),
     toggleEl: widget.querySelector("#ai-usage-toggle"),
     previewEl: widget.querySelector("#ai-usage-preview"),
     previewBodyEl: widget.querySelector("#ai-usage-preview-body"),
-    errorEl: widget.querySelector("#ai-usage-error"),
+    optimizationErrorEl: widget.querySelector("#ai-usage-optimization-error"),
     applyEl: widget.querySelector("#ai-usage-apply"),
   };
+
+  ui.optimizeEl.addEventListener("click", requestOptimization);
 
   ui.toggleEl.addEventListener("click", () => {
     previewVisible = !previewVisible;
@@ -161,14 +185,11 @@ function ensureWidget() {
   });
 
   ui.applyEl.addEventListener("click", () => {
-    if (!analysisState || !analysisState.packed_prompt_text) {
+    if (!optimizationState?.packed_prompt_text || !activeInput) {
       return;
     }
-    if (!activeInput) {
-      return;
-    }
-    AIUsageDomExtractors.setInputValue(activeInput, analysisState.packed_prompt_text);
-    scheduleOptimize(analysisState.packed_prompt_text);
+    AIUsageDomExtractors.setInputValue(activeInput, optimizationState.packed_prompt_text);
+    ui.liveStatusEl.textContent = "Optimized prompt applied. Updating estimate…";
   });
 
   return ui;
@@ -183,44 +204,31 @@ function positionWidget(inputElement) {
 
   const rect = inputElement.getBoundingClientRect();
   const widgetRect = widget.getBoundingClientRect();
-
   let top = window.scrollY + rect.top - widgetRect.height - 10;
   if (top < window.scrollY + 10) {
     top = window.scrollY + rect.bottom + 10;
   }
-
-  const left = window.scrollX + rect.left;
   widget.style.top = `${top}px`;
-  widget.style.left = `${left}px`;
-}
-
-function setWidgetError(message) {
-  const { widget, errorEl } = ensureWidget();
-  errorEl.textContent = message;
-  widget.classList.remove("ai-usage-hidden");
+  widget.style.left = `${window.scrollX + rect.left}px`;
 }
 
 function setWidgetHidden() {
-  const { widget, errorEl } = ensureWidget();
-  errorEl.textContent = "";
+  const { widget, liveStatusEl, optimizationErrorEl } = ensureWidget();
+  liveStatusEl.textContent = "";
+  optimizationErrorEl.textContent = "";
   widget.classList.add("ai-usage-hidden");
 }
 
-function getConfidenceLevel(confidence) {
-  if (confidence >= 0.8) {
-    return "green";
-  }
-  if (confidence >= 0.6) {
-    return "yellow";
-  }
-  return "red";
+function setLiveError(message) {
+  const { widget, liveStatusEl } = ensureWidget();
+  liveStatusEl.textContent = message;
+  widget.classList.remove("ai-usage-hidden");
+  positionWidget(activeInput);
 }
 
 function formatCount(value) {
-  if (Number.isFinite(value)) {
-    return value;
-  }
-  return "-";
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.max(Math.round(numeric), 0).toLocaleString() : "-";
 }
 
 function clipText(text, maxChars) {
@@ -234,31 +242,107 @@ function renderPackedPrompt(renderedPrompt) {
   if (!Array.isArray(renderedPrompt) || renderedPrompt.length === 0) {
     return "";
   }
-
-  const parts = renderedPrompt.map((item) => {
-    const role = (item.role || "unknown").toUpperCase();
-    const content = (item.content || "").trim();
-    return `${role}:\n${content}`;
-  });
-
-  return parts.join("\n\n");
+  return renderedPrompt
+    .map((item) => {
+      const role = (item.role || "unknown").toUpperCase();
+      const content = (item.content || "").trim();
+      return `${role}:\n${content}`;
+    })
+    .join("\n\n");
 }
 
-function updateWidget(data) {
+function setWidgetRisk(level) {
+  const normalized = ["green", "yellow", "red"].includes(level) ? level : "green";
+  const { widget, riskEl } = ensureWidget();
+  riskEl.textContent = `Risk: ${level || "-"}`;
+  riskEl.classList.remove(
+    "ai-usage-badge--green",
+    "ai-usage-badge--yellow",
+    "ai-usage-badge--red"
+  );
+  riskEl.classList.add(`ai-usage-badge--${normalized}`);
+  widget.classList.remove(
+    "ai-usage-widget--green",
+    "ai-usage-widget--yellow",
+    "ai-usage-widget--red"
+  );
+  widget.classList.add(`ai-usage-widget--${normalized}`);
+}
+
+function resetOptimizationPresentation() {
+  if (!ui) {
+    return;
+  }
+  optimizationState = null;
+  previewVisible = false;
+  ui.optimizationEl.hidden = true;
+  ui.previewEl.classList.add("ai-usage-preview--hidden");
+  ui.toggleEl.textContent = "Show packed prompt";
+  ui.applyEl.disabled = true;
+  ui.optimizationErrorEl.textContent = "";
+}
+
+function updateLiveWidget(data, message) {
   const {
     widget,
+    inputEl,
+    outputEl,
+    projectedEl,
+    availableRowEl,
+    availableEl,
+    liveStatusEl,
+    modelEl,
+    optimizeEl,
+  } = ensureWidget();
+
+  if (optimizationMessage && optimizationMessage !== message) {
+    optimizationMessage = "";
+    resetOptimizationPresentation();
+  }
+
+  const sessionTokens = Number(data?.session_tokens);
+  const projectedTokens = Number(data?.projected_total_tokens);
+  const projectedSessionTotal =
+    (Number.isFinite(sessionTokens) ? sessionTokens : 0) +
+    (Number.isFinite(projectedTokens) ? projectedTokens : 0);
+  const availableContext = Number(data?.available_context_tokens);
+
+  inputEl.textContent = formatCount(data?.input_tokens);
+  outputEl.textContent = formatCount(data?.predicted_output_tokens);
+  projectedEl.textContent = formatCount(projectedSessionTotal);
+  availableRowEl.hidden = !Number.isFinite(availableContext);
+  availableEl.textContent = formatCount(availableContext);
+  modelEl.textContent = selectedModelProfile ? `Model: ${selectedModelProfile}` : "Model: -";
+  liveStatusEl.textContent = "";
+  optimizeEl.disabled = false;
+  setWidgetRisk(data?.risk_level);
+  widget.classList.remove("ai-usage-hidden");
+  positionWidget(activeInput);
+}
+
+function getConfidenceLevel(confidence) {
+  if (confidence >= 0.8) {
+    return "green";
+  }
+  if (confidence >= 0.6) {
+    return "yellow";
+  }
+  return "red";
+}
+
+function updateOptimizationWidget(data) {
+  const {
+    widget,
+    optimizationEl,
     originalEl,
     optimizedEl,
     savingsEl,
     chunksEl,
-    badgeEl,
-    modelEl,
-    applyEl,
+    confidenceEl,
     previewBodyEl,
-    errorEl,
+    optimizationErrorEl,
+    applyEl,
   } = ensureWidget();
-  errorEl.textContent = "";
-
   const tokenCounts = data?.optimized?.token_counts || {};
   const original = Number(tokenCounts.original);
   const optimized = Number(tokenCounts.optimized);
@@ -271,35 +355,49 @@ function updateWidget(data) {
   const chunksText = Number.isFinite(totalChunks) && totalChunks > 0
     ? `${keptChunks}/${totalChunks}`
     : "-";
-  const confidenceText = Number.isFinite(confidenceValue)
-    ? `confidence ${Math.round(confidenceValue * 100)}%`
-    : "confidence -";
   const packedPrompt = renderPackedPrompt(data?.optimized?.rendered_prompt);
 
+  optimizationState = {
+    ...data,
+    message: optimizationMessage,
+    packed_prompt_text: packedPrompt,
+  };
   originalEl.textContent = formatCount(original);
   optimizedEl.textContent = formatCount(optimized);
   savingsEl.textContent = formatCount(savings);
   chunksEl.textContent = chunksText;
-  modelEl.textContent = selectedModelProfile ? `Model: ${selectedModelProfile}` : "Model: -";
-  const previewText = packedPrompt || "No packed prompt available yet.";
-  previewBodyEl.textContent = clipText(previewText, MAX_PREVIEW_CHARS) || "";
+  previewBodyEl.textContent = clipText(
+    packedPrompt || "No packed prompt available.",
+    MAX_PREVIEW_CHARS
+  );
   applyEl.disabled = !packedPrompt;
+  optimizationErrorEl.textContent = "";
+  optimizationEl.hidden = false;
 
   const confidenceLevel = Number.isFinite(confidenceValue)
     ? getConfidenceLevel(confidenceValue)
     : "green";
-  badgeEl.textContent = confidenceText;
-  badgeEl.classList.remove("ai-usage-badge--green", "ai-usage-badge--yellow", "ai-usage-badge--red");
-  badgeEl.classList.add(`ai-usage-badge--${confidenceLevel}`);
-
-  widget.classList.remove(
-    "ai-usage-widget--green",
-    "ai-usage-widget--yellow",
-    "ai-usage-widget--red"
+  confidenceEl.textContent = Number.isFinite(confidenceValue)
+    ? `Confidence: ${Math.round(confidenceValue * 100)}%`
+    : "Confidence: -";
+  confidenceEl.classList.remove(
+    "ai-usage-badge--green",
+    "ai-usage-badge--yellow",
+    "ai-usage-badge--red"
   );
-  widget.classList.add(`ai-usage-widget--${confidenceLevel}`);
-
+  confidenceEl.classList.add(`ai-usage-badge--${confidenceLevel}`);
   widget.classList.remove("ai-usage-hidden");
+  positionWidget(activeInput);
+}
+
+function setOptimizeLoading(running) {
+  const { optimizeEl, optimizationErrorEl } = ensureWidget();
+  optimizeEl.disabled = running;
+  optimizeEl.textContent = running ? "Optimizing…" : "Optimize context";
+  optimizeEl.setAttribute("aria-busy", running ? "true" : "false");
+  if (running) {
+    optimizationErrorEl.textContent = "Optimizing context…";
+  }
   positionWidget(activeInput);
 }
 
@@ -307,21 +405,20 @@ function collectConversationMessages(maxMessages) {
   return AIUsageDomExtractors.extractMessages(document, maxMessages);
 }
 
-async function optimizeMessage(message) {
-  const trimmed = message.trim();
-  if (!trimmed) {
-    analysisState = null;
-    setWidgetHidden();
+async function requestOptimization() {
+  const message = AIUsageDomExtractors.getInputValue(activeInput).trim();
+  if (!message) {
     return;
   }
 
+  optimizationMessage = message;
   const historyMessages = collectConversationMessages(MAX_HISTORY_MESSAGES);
   const lastHistory = historyMessages[historyMessages.length - 1];
-  if (!lastHistory || lastHistory.role !== "user" || lastHistory.content !== trimmed) {
-    historyMessages.push({ role: "user", content: trimmed });
+  if (!lastHistory || lastHistory.role !== "user" || lastHistory.content !== message) {
+    historyMessages.push({ role: "user", content: message });
   }
 
-  const response = await AIUsageAPI.optimize({
+  await contentController.optimize({
     session_id: sessionId,
     model_profile: selectedModelProfile,
     strategy: DEFAULT_STRATEGY,
@@ -334,54 +431,33 @@ async function optimizeMessage(message) {
       include_removed_chunks: false,
     },
   });
-
-  if (response && response.success) {
-    const data = response.data;
-    const tokenCounts = data?.optimized?.token_counts || {};
-    const packedPrompt = renderPackedPrompt(data?.optimized?.rendered_prompt);
-    analysisState = {
-      ...data,
-      message: trimmed,
-      original_tokens: Number(tokenCounts.original) || 0,
-      optimized_tokens: Number(tokenCounts.optimized) || 0,
-      packed_prompt_text: packedPrompt,
-    };
-    updateWidget(data);
-  } else {
-    analysisState = null;
-    setWidgetError("Backend not reachable");
-  }
-}
-
-function scheduleOptimize(message) {
-  clearTimeout(debounceId);
-  debounceId = setTimeout(() => optimizeMessage(message), OPTIMIZE_DEBOUNCE_MS);
 }
 
 function commitUsage() {
-  if (!analysisState) {
+  if (!liveEstimateState) {
     return;
   }
 
-  const message = (analysisState.message || "").trim();
-  if (!message || message === lastCommittedText) {
+  const currentMessage = AIUsageDomExtractors.getInputValue(activeInput).trim();
+  const message = (liveEstimateState.message || "").trim();
+  if (!message || message !== currentMessage || message === lastCommittedText) {
     return;
   }
 
-  lastCommittedText = message;
-  const deltaTokens = Number(analysisState.optimized_tokens || analysisState.original_tokens || 0);
+  const deltaTokens = Number(liveEstimateState.input_tokens || 0);
   if (deltaTokens <= 0) {
     return;
   }
+  lastCommittedText = message;
+
   storageGet([STORAGE_KEYS.sessionTokens])
     .then((result) => {
       const current = result[STORAGE_KEYS.sessionTokens] || {};
-      const updated = {
-        ...current,
-        [sessionId]: (Number(current[sessionId]) || 0) + deltaTokens,
-      };
       return storageSet({
-        [STORAGE_KEYS.sessionTokens]: updated,
+        [STORAGE_KEYS.sessionTokens]: {
+          ...current,
+          [sessionId]: (Number(current[sessionId]) || 0) + deltaTokens,
+        },
         [STORAGE_KEYS.activeSession]: sessionId,
       });
     })
@@ -392,7 +468,10 @@ function commitUsage() {
 
 function handleInputEvent(event) {
   const message = AIUsageDomExtractors.getInputValue(event.target);
-  scheduleOptimize(message);
+  contentController.scheduleAnalyze(message, {
+    sessionId,
+    modelProfile: selectedModelProfile,
+  });
 }
 
 function handleKeydown(event) {
@@ -405,7 +484,6 @@ function attachToInput(element) {
   if (!element || element.dataset.aiUsageAttached) {
     return;
   }
-
   element.dataset.aiUsageAttached = "true";
   element.addEventListener("input", handleInputEvent);
   element.addEventListener("keydown", handleKeydown);
@@ -414,7 +492,6 @@ function attachToInput(element) {
 
 function hookSendButton() {
   const button = AIUsageDomExtractors.findSendButton(document);
-
   if (button && !button.dataset.aiUsageAttached) {
     button.dataset.aiUsageAttached = "true";
     button.addEventListener("click", commitUsage);
@@ -431,7 +508,7 @@ function ensureInput() {
       domObserver.notifyFailure();
     }
     if (domFailures > 8) {
-      setWidgetError("Chat input not detected. Waiting for UI...");
+      setLiveError("Chat input not detected. Waiting for UI…");
       logDebug("Input not found", AIUsageDomCompatibility.describe(document));
     }
     return;
@@ -456,7 +533,6 @@ function startObservers() {
     ensureInput();
     hookSendButton();
   });
-
   domObserver.observe(document.body);
 
   window.addEventListener(
@@ -468,7 +544,6 @@ function startObservers() {
     },
     { passive: true }
   );
-
   window.addEventListener("resize", () => {
     if (activeInput) {
       positionWidget(activeInput);
@@ -476,31 +551,64 @@ function startObservers() {
   });
 }
 
+contentController = AIUsageContentController.create({
+  api: AIUsageAPI,
+  debounceMs: ANALYZE_DEBOUNCE_MS,
+  onLiveSuccess(data, message) {
+    liveEstimateState = { ...data, message };
+    updateLiveWidget(data, message);
+  },
+  onLiveError(error) {
+    setLiveError(`Live estimate unavailable: ${error}`);
+  },
+  onLiveClear() {
+    liveEstimateState = null;
+    optimizationMessage = "";
+    resetOptimizationPresentation();
+    setWidgetHidden();
+  },
+  onOptimizeStart() {
+    resetOptimizationPresentation();
+    setOptimizeLoading(true);
+  },
+  onOptimizeSuccess(data) {
+    setOptimizeLoading(false);
+    updateOptimizationWidget(data);
+  },
+  onOptimizeError(error) {
+    const { optimizationEl, optimizationErrorEl } = ensureWidget();
+    setOptimizeLoading(false);
+    optimizationEl.hidden = true;
+    optimizationErrorEl.textContent = `Optimization unavailable: ${error}`;
+    positionWidget(activeInput);
+  },
+});
+
 async function init() {
   await loadConfig();
   await loadSelectedModel();
   await resolveSessionId();
 
   const { modelEl } = ensureWidget();
-  if (modelEl) {
-    modelEl.textContent = selectedModelProfile ? `Model: ${selectedModelProfile}` : "Model: -";
-  }
+  modelEl.textContent = selectedModelProfile ? `Model: ${selectedModelProfile}` : "Model: -";
 
   if (!AIUsageDomCompatibility.isSupportedHost(window.location)) {
     logDebug("Unsupported host", window.location.host);
     return;
   }
-
   startObservers();
 }
 
 chrome.storage.onChanged.addListener((changes) => {
   if (changes[STORAGE_KEYS.modelProfile]) {
     selectedModelProfile = changes[STORAGE_KEYS.modelProfile].newValue || config.default_model_profile;
-    if (ui && ui.modelEl) {
+    if (ui?.modelEl) {
       ui.modelEl.textContent = selectedModelProfile
         ? `Model: ${selectedModelProfile}`
         : "Model: -";
+    }
+    if (activeInput) {
+      handleInputEvent({ target: activeInput });
     }
   }
 });

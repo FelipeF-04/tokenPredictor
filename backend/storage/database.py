@@ -17,7 +17,8 @@ class Database:
 
     def _initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
             connection.execute("PRAGMA journal_mode=WAL;")
             connection.execute(
                 """
@@ -35,21 +36,32 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(last_updated)"
             )
             connection.commit()
+        finally:
+            connection.close()
 
     def execute(self, statement: str, parameters: Iterable = ()) -> None:
         with self._lock:
-            with self._connect() as connection:
+            connection = self._connect()
+            try:
                 connection.execute(statement, tuple(parameters))
                 connection.commit()
+            finally:
+                connection.close()
 
     def fetch_one(self, statement: str, parameters: Iterable = ()) -> Optional[sqlite3.Row]:
         with self._lock:
-            with self._connect() as connection:
+            connection = self._connect()
+            try:
                 cursor = connection.execute(statement, tuple(parameters))
                 return cursor.fetchone()
+            finally:
+                connection.close()
 
     def fetch_all(self, statement: str, parameters: Iterable = ()) -> Iterable[sqlite3.Row]:
         with self._lock:
-            with self._connect() as connection:
+            connection = self._connect()
+            try:
                 cursor = connection.execute(statement, tuple(parameters))
                 return cursor.fetchall()
+            finally:
+                connection.close()
