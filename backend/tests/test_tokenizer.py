@@ -5,11 +5,7 @@ import unittest
 from unittest import mock
 
 import tokenizer
-
-
-class FakeEncoding:
-    def encode(self, text):
-        return text.split()
+from tests.fakes import FakeEncoding
 
 
 class TokenizerTests(unittest.TestCase):
@@ -17,7 +13,7 @@ class TokenizerTests(unittest.TestCase):
         tokenizer.set_encoding(FakeEncoding())
 
     def test_module_import_does_not_initialize_encoding(self):
-        tokenizer_path = Path(__file__).with_name("tokenizer.py")
+        tokenizer_path = Path(__file__).resolve().parents[1] / "tokenizer.py"
         spec = importlib.util.spec_from_file_location("tokenizer_import_probe", tokenizer_path)
         module = importlib.util.module_from_spec(spec)
 

@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <body>
+    <main>
+      <article data-testid="conversation-turn-1">
+        <div data-message-author-role="user">
+          <p>Explain the compatibility guardrails.</p>
+        </div>
+      </article>
+      <article data-testid="conversation-turn-2">
+        <div data-message-author-role="assistant">
+          <p>They keep API and DOM behavior stable.</p>
+        </div>
+      </article>
+      <article data-testid="conversation-turn-3">
+        <div data-message-author-role="user">
+          <p>Keep the tests offline.</p>
+        </div>
+      </article>
+    </main>
+    <form data-type="unified-composer">
+      <textarea hidden aria-hidden="true"></textarea>
+      <div
+        id="prompt-textarea"
+        contenteditable="true"
+        data-placeholder="Message ChatGPT"
+      ></div>
+      <button type="submit" data-testid="send-button" aria-label="Send prompt"></button>
+    </form>
+  </body>
+</html>

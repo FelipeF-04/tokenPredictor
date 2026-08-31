@@ -1,5 +1,6 @@
-const assert = require("assert");
-const path = require("path");
+const assert = require("node:assert/strict");
+const path = require("node:path");
+const test = require("node:test");
 
 const compatibility = require(path.join(__dirname, "..", "dom", "compatibility.js"));
 
@@ -10,16 +11,16 @@ function mockDocument(hostname) {
   };
 }
 
-const chatgpt = mockDocument("chatgpt.com");
-const openai = mockDocument("chat.openai.com");
-const other = mockDocument("example.com");
+test("supported ChatGPT hosts are detected", () => {
+  for (const hostname of ["chatgpt.com", "chat.openai.com"]) {
+    const document = mockDocument(hostname);
+    assert.equal(compatibility.detectHost(document.location), hostname);
+    assert.equal(compatibility.isSupportedHost(document.location), true);
+  }
+});
 
-assert.strictEqual(compatibility.detectHost(chatgpt.location), "chatgpt.com");
-assert.strictEqual(compatibility.detectHost(openai.location), "chat.openai.com");
-assert.strictEqual(compatibility.detectHost(other.location), "unknown");
-
-assert.strictEqual(compatibility.isSupportedHost(chatgpt.location), true);
-assert.strictEqual(compatibility.isSupportedHost(openai.location), true);
-assert.strictEqual(compatibility.isSupportedHost(other.location), false);
-
-console.log("dom_compatibility.test.js passed");
+test("unrelated hosts are rejected", () => {
+  const document = mockDocument("example.com");
+  assert.equal(compatibility.detectHost(document.location), "unknown");
+  assert.equal(compatibility.isSupportedHost(document.location), false);
+});

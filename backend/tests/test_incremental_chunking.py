@@ -4,11 +4,7 @@ from optimization.incremental.chunking import IncrementalChunker
 from optimization.models import Message, SessionState
 from optimization.semantic_chunker import SemanticChunker
 from tokenizer import set_encoding
-
-
-class FakeEncoding:
-    def encode(self, text):
-        return text.split()
+from tests.fakes import FakeEncoding
 
 
 class IncrementalChunkingTests(unittest.TestCase):

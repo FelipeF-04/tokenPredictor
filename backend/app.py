@@ -1,4 +1,7 @@
+import json
+import os
 from pathlib import Path
+import re
 
 from flask import Flask, jsonify, request
 
@@ -11,6 +14,13 @@ from optimization.pipeline import OptimizationPipeline
 app = Flask(__name__)
 
 MAX_ANALYZE_MESSAGE_CHARS = 100_000
+MAX_REQUEST_BYTES = 1_048_576
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 5000
+_CHROME_EXTENSION_ORIGIN = re.compile(r"^chrome-extension://[a-p]{32}$")
+_LOOPBACK_ORIGIN = re.compile(r"^https?://(?:localhost|127\.0\.0\.1)(?::\d+)?$")
+
+app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
 
 _config = load_config()
 _pipeline = OptimizationPipeline()
@@ -23,7 +33,65 @@ _session_store = SessionStore(
 )
 
 
-def _json_error(message, status=400):
+def _runtime_mode(environ=None):
+    source = environ if environ is not None else os.environ
+    return source.get("AI_USAGE_ENV", "production").strip().lower()
+
+
+def _is_truthy(value):
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _server_options(environ=None):
+    source = environ if environ is not None else os.environ
+    host = source.get("AI_USAGE_HOST", DEFAULT_HOST).strip() or DEFAULT_HOST
+    try:
+        port = int(source.get("AI_USAGE_PORT", DEFAULT_PORT))
+    except (TypeError, ValueError):
+        port = DEFAULT_PORT
+    if not 1 <= port <= 65_535:
+        port = DEFAULT_PORT
+    debug = _runtime_mode(source) == "development" and _is_truthy(
+        source.get("AI_USAGE_DEBUG")
+    )
+    return {"host": host, "port": port, "debug": debug}
+
+
+def _configured_origins(environ=None):
+    source = environ if environ is not None else os.environ
+    raw = source.get("AI_USAGE_ALLOWED_ORIGINS", "")
+    return {origin.strip() for origin in raw.split(",") if origin.strip()}
+
+
+def _is_allowed_origin(origin, environ=None):
+    if not origin:
+        return False
+    if origin in _configured_origins(environ):
+        return True
+    if _runtime_mode(environ) != "development":
+        return False
+    return bool(
+        _CHROME_EXTENSION_ORIGIN.fullmatch(origin)
+        or _LOOPBACK_ORIGIN.fullmatch(origin)
+    )
+
+
+def _log_request_error(status, error_type, exception=None):
+    details = {
+        "event": "request_error",
+        "error_type": error_type,
+        "method": request.method,
+        "path": request.path,
+        "status": status,
+    }
+    if exception is not None:
+        details["exception_type"] = type(exception).__name__
+    app.logger.warning(json.dumps(details, sort_keys=True, separators=(",", ":")))
+
+
+def _json_error(message, status=400, log_event=None, exception=None):
+    if log_event:
+        _log_request_error(status, log_event, exception)
     response = jsonify({"error": message})
     return response, status
 
@@ -37,10 +105,22 @@ def _json_object():
 
 @app.after_request
 def _add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    origin = request.headers.get("Origin")
+    if _is_allowed_origin(origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers.add("Vary", "Origin")
     return response
+
+
+@app.errorhandler(413)
+def _request_too_large(_error):
+    return _json_error(
+        f"request body must be at most {MAX_REQUEST_BYTES} bytes",
+        status=413,
+        log_event="request_too_large",
+    )
 
 
 def _handle_options():
@@ -71,6 +151,7 @@ def analyze():
         return _json_error(
             f"message must be at most {MAX_ANALYZE_MESSAGE_CHARS} characters",
             status=413,
+            log_event="message_too_large",
         )
 
     session_id = data.get("session_id")
@@ -85,7 +166,9 @@ def analyze():
     try:
         input_tokens = count_tokens(message)
     except TokenizerUnavailableError as exc:
-        return _json_error(str(exc), status=503)
+        return _json_error(
+            str(exc), status=503, log_event="tokenizer_unavailable", exception=exc
+        )
 
     predicted_output_tokens = predict_output_tokens(message, input_tokens)
     projected_total_tokens = input_tokens + predicted_output_tokens
@@ -176,9 +259,16 @@ def optimize():
     except ValueError as exc:
         return _json_error(str(exc))
     except TokenizerUnavailableError as exc:
-        return _json_error(str(exc), status=503)
-    except Exception:
-        return _json_error("optimization failed", status=500)
+        return _json_error(
+            str(exc), status=503, log_event="tokenizer_unavailable", exception=exc
+        )
+    except Exception as exc:
+        return _json_error(
+            "optimization failed",
+            status=500,
+            log_event="optimization_failed",
+            exception=exc,
+        )
 
     return jsonify(result)
 
@@ -243,4 +333,4 @@ def reset_default_session():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(**_server_options())
