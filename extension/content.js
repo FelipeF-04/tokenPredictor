@@ -3,6 +3,8 @@ const STORAGE_KEYS = {
   sessionMap: "aiUsageSessionByConversation",
   activeSession: "aiUsageActiveSessionId",
   modelProfile: "aiUsageModelProfile",
+  ledgerQueue: "aiUsageLedgerQueue",
+  ledgerStatus: "aiUsageLedgerStatus",
 };
 
 const ANALYZE_DEBOUNCE_MS = 300;
@@ -12,6 +14,8 @@ const DEFAULT_EMBEDDING_PROVIDER = "sentence-transformers";
 const DEFAULT_EMBEDDING_MODEL = "bge-small-en";
 const MAX_HISTORY_MESSAGES = 16;
 const MAX_PREVIEW_CHARS = 3000;
+const ASSISTANT_STABILITY_MS = 2500;
+const LEDGER_RETRY_MS = 15000;
 
 const DEFAULT_CONFIG = {
   backend_base_url: "http://localhost:5000",
@@ -22,10 +26,9 @@ const DEFAULT_CONFIG = {
 };
 
 let activeInput = null;
-let liveEstimateState = null;
 let optimizationState = null;
 let optimizationMessage = "";
-let lastCommittedText = "";
+let actualSessionTotal = null;
 let ui = null;
 let previewVisible = false;
 let sessionId = null;
@@ -35,6 +38,10 @@ let domObserver = null;
 let domFailures = 0;
 let currentConversationKey = null;
 let contentController = null;
+let conversationTracker = null;
+let ledgerStatusState = { state: "synced", text: "Session synced", pendingCount: 0 };
+let lastLedgerStatusSessionId = null;
+let ledgerStatusWrite = Promise.resolve();
 
 function logDebug(message, details) {
   if (config?.debug?.dom) {
@@ -58,6 +65,91 @@ function storageSet(payload) {
   return new Promise((resolve) => {
     chrome.storage.local.set(payload, () => resolve());
   });
+}
+
+function updateActualSessionTotal(total, targetSessionId = sessionId) {
+  const numeric = Number(total);
+  if (!Number.isFinite(numeric)) {
+    return;
+  }
+  if (ui?.actualEl && targetSessionId === sessionId) {
+    actualSessionTotal = numeric;
+    ui.actualEl.textContent = formatCount(numeric);
+  }
+}
+
+async function persistCorrectedSessionTotal(data, payload) {
+  const targetSessionId = data?.session_id || payload?.session_id;
+  const total = Number(data?.corrected_session_total ?? data?.session_tokens);
+  if (!targetSessionId || !Number.isFinite(total)) {
+    return;
+  }
+  const stored = await storageGet([STORAGE_KEYS.sessionTokens]);
+  const totals = stored[STORAGE_KEYS.sessionTokens] || {};
+  await storageSet({
+    [STORAGE_KEYS.sessionTokens]: { ...totals, [targetSessionId]: total },
+    [STORAGE_KEYS.activeSession]: sessionId,
+  });
+  updateActualSessionTotal(total, targetSessionId);
+}
+
+async function loadCachedSessionTotal() {
+  if (!sessionId) {
+    return;
+  }
+  const stored = await storageGet([STORAGE_KEYS.sessionTokens]);
+  const totals = stored[STORAGE_KEYS.sessionTokens] || {};
+  if (Object.prototype.hasOwnProperty.call(totals, sessionId)) {
+    updateActualSessionTotal(Number(totals[sessionId]) || 0);
+  } else {
+    actualSessionTotal = null;
+    if (ui?.actualEl) {
+      ui.actualEl.textContent = "0";
+    }
+  }
+}
+
+function updateLedgerStatus(status) {
+  const nextStatus = status || {
+    state: "synced",
+    text: "Session synced",
+    pendingCount: 0,
+  };
+  const changed =
+    ledgerStatusState.state !== nextStatus.state ||
+    ledgerStatusState.text !== nextStatus.text ||
+    ledgerStatusState.pendingCount !== nextStatus.pendingCount ||
+    lastLedgerStatusSessionId !== sessionId;
+  ledgerStatusState = nextStatus;
+  const { widget, syncStatusEl } = ensureWidget();
+  syncStatusEl.textContent = ledgerStatusState.text;
+  syncStatusEl.classList.remove(
+    "ai-usage-sync-status--synced",
+    "ai-usage-sync-status--waiting",
+    "ai-usage-sync-status--queued"
+  );
+  syncStatusEl.classList.add(`ai-usage-sync-status--${ledgerStatusState.state}`);
+  if (ledgerStatusState.state !== "synced") {
+    widget.classList.remove("ai-usage-hidden");
+    positionWidget(activeInput);
+  }
+  if (changed && sessionId) {
+    const targetSessionId = sessionId;
+    const statusSnapshot = { ...ledgerStatusState };
+    lastLedgerStatusSessionId = targetSessionId;
+    ledgerStatusWrite = ledgerStatusWrite
+      .then(() => storageGet([STORAGE_KEYS.ledgerStatus]))
+      .then((stored) => {
+        const statuses = stored[STORAGE_KEYS.ledgerStatus] || {};
+        return storageSet({
+          [STORAGE_KEYS.ledgerStatus]: {
+            ...statuses,
+            [targetSessionId]: statusSnapshot,
+          },
+        });
+      })
+      .catch(() => {});
+  }
 }
 
 async function loadConfig() {
@@ -103,12 +195,14 @@ async function ensureConversationSession() {
   if (conversationKey !== currentConversationKey) {
     contentController.invalidateLive();
     await resolveSessionId();
-    liveEstimateState = null;
     optimizationState = null;
     optimizationMessage = "";
-    lastCommittedText = "";
+    actualSessionTotal = null;
+    await loadCachedSessionTotal();
     setWidgetHidden();
+    return true;
   }
+  return false;
 }
 
 function ensureWidget() {
@@ -123,14 +217,17 @@ function ensureWidget() {
   widget.innerHTML = `
     <div class="ai-usage-title">AI Usage Predictor</div>
     <div class="ai-usage-model" id="ai-usage-model">Model: -</div>
+    <div class="ai-usage-section-title">Live draft estimate</div>
     <div class="ai-usage-row"><span>Input tokens</span><span id="ai-usage-input">-</span></div>
     <div class="ai-usage-row"><span>Estimated output</span><span id="ai-usage-output">-</span></div>
-    <div class="ai-usage-row"><span>Projected session total</span><span id="ai-usage-projected">-</span></div>
+    <div class="ai-usage-row"><span>Projected total if sent</span><span id="ai-usage-projected">-</span></div>
+    <div class="ai-usage-row"><span>Actual session total</span><span id="ai-usage-actual">0</span></div>
     <div class="ai-usage-row" id="ai-usage-available-row" hidden>
       <span>Available context</span><span id="ai-usage-available">-</span>
     </div>
     <div class="ai-usage-badge ai-usage-badge--green" id="ai-usage-risk" role="status" aria-live="polite">Risk: -</div>
     <div class="ai-usage-status" id="ai-usage-live-status" role="status" aria-live="polite"></div>
+    <div class="ai-usage-sync-status" id="ai-usage-sync-status" role="status" aria-live="polite">Session synced</div>
     <button class="ai-usage-optimize" id="ai-usage-optimize" type="button" disabled>Optimize context</button>
     <div class="ai-usage-optimization" id="ai-usage-optimization" hidden>
       <div class="ai-usage-section-title">Context optimization</div>
@@ -156,10 +253,12 @@ function ensureWidget() {
     inputEl: widget.querySelector("#ai-usage-input"),
     outputEl: widget.querySelector("#ai-usage-output"),
     projectedEl: widget.querySelector("#ai-usage-projected"),
+    actualEl: widget.querySelector("#ai-usage-actual"),
     availableRowEl: widget.querySelector("#ai-usage-available-row"),
     availableEl: widget.querySelector("#ai-usage-available"),
     riskEl: widget.querySelector("#ai-usage-risk"),
     liveStatusEl: widget.querySelector("#ai-usage-live-status"),
+    syncStatusEl: widget.querySelector("#ai-usage-sync-status"),
     modelEl: widget.querySelector("#ai-usage-model"),
     optimizeEl: widget.querySelector("#ai-usage-optimize"),
     optimizationEl: widget.querySelector("#ai-usage-optimization"),
@@ -216,6 +315,11 @@ function setWidgetHidden() {
   const { widget, liveStatusEl, optimizationErrorEl } = ensureWidget();
   liveStatusEl.textContent = "";
   optimizationErrorEl.textContent = "";
+  if (ledgerStatusState.state !== "synced") {
+    widget.classList.remove("ai-usage-hidden");
+    positionWidget(activeInput);
+    return;
+  }
   widget.classList.add("ai-usage-hidden");
 }
 
@@ -288,6 +392,7 @@ function updateLiveWidget(data, message) {
     inputEl,
     outputEl,
     projectedEl,
+    actualEl,
     availableRowEl,
     availableEl,
     liveStatusEl,
@@ -301,15 +406,24 @@ function updateLiveWidget(data, message) {
   }
 
   const sessionTokens = Number(data?.session_tokens);
+  if (!Number.isFinite(actualSessionTotal) && Number.isFinite(sessionTokens)) {
+    updateActualSessionTotal(sessionTokens);
+  }
+  const committedSessionTokens = Number.isFinite(actualSessionTotal)
+    ? actualSessionTotal
+    : Number.isFinite(sessionTokens)
+      ? sessionTokens
+      : 0;
   const projectedTokens = Number(data?.projected_total_tokens);
   const projectedSessionTotal =
-    (Number.isFinite(sessionTokens) ? sessionTokens : 0) +
+    committedSessionTokens +
     (Number.isFinite(projectedTokens) ? projectedTokens : 0);
   const availableContext = Number(data?.available_context_tokens);
 
   inputEl.textContent = formatCount(data?.input_tokens);
   outputEl.textContent = formatCount(data?.predicted_output_tokens);
   projectedEl.textContent = formatCount(projectedSessionTotal);
+  actualEl.textContent = formatCount(committedSessionTokens);
   availableRowEl.hidden = !Number.isFinite(availableContext);
   availableEl.textContent = formatCount(availableContext);
   modelEl.textContent = selectedModelProfile ? `Model: ${selectedModelProfile}` : "Model: -";
@@ -433,37 +547,24 @@ async function requestOptimization() {
   });
 }
 
-function commitUsage() {
-  if (!liveEstimateState) {
+function noteConversationSend() {
+  if (conversationTracker) {
+    conversationTracker.markWaiting();
+  }
+  setTimeout(() => {
+    scanConversation().catch(() => {});
+  }, 0);
+}
+
+async function scanConversation() {
+  if (!conversationTracker || !sessionId) {
     return;
   }
-
-  const currentMessage = AIUsageDomExtractors.getInputValue(activeInput).trim();
-  const message = (liveEstimateState.message || "").trim();
-  if (!message || message !== currentMessage || message === lastCommittedText) {
-    return;
-  }
-
-  const deltaTokens = Number(liveEstimateState.input_tokens || 0);
-  if (deltaTokens <= 0) {
-    return;
-  }
-  lastCommittedText = message;
-
-  storageGet([STORAGE_KEYS.sessionTokens])
-    .then((result) => {
-      const current = result[STORAGE_KEYS.sessionTokens] || {};
-      return storageSet({
-        [STORAGE_KEYS.sessionTokens]: {
-          ...current,
-          [sessionId]: (Number(current[sessionId]) || 0) + deltaTokens,
-        },
-        [STORAGE_KEYS.activeSession]: sessionId,
-      });
-    })
-    .catch(() => {});
-
-  AIUsageAPI.commit(sessionId, deltaTokens, selectedModelProfile).catch(() => {});
+  const events = AIUsageDomExtractors.extractMessageEvents(document);
+  await conversationTracker.observe(events, {
+    sessionId,
+    modelProfile: selectedModelProfile,
+  });
 }
 
 function handleInputEvent(event) {
@@ -476,7 +577,7 @@ function handleInputEvent(event) {
 
 function handleKeydown(event) {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
-    commitUsage();
+    noteConversationSend();
   }
 }
 
@@ -494,12 +595,11 @@ function hookSendButton() {
   const button = AIUsageDomExtractors.findSendButton(document);
   if (button && !button.dataset.aiUsageAttached) {
     button.dataset.aiUsageAttached = "true";
-    button.addEventListener("click", commitUsage);
+    button.addEventListener("click", noteConversationSend);
   }
 }
 
 function ensureInput() {
-  ensureConversationSession().catch(() => {});
   const inputElement = AIUsageDomExtractors.findInputElement(document);
   if (!inputElement) {
     setWidgetHidden();
@@ -524,16 +624,32 @@ function ensureInput() {
   logDebug("Input attached", { host: window.location.host });
 }
 
-function startObservers() {
-  ensureWidget();
+async function refreshPageState() {
+  await ensureConversationSession();
   ensureInput();
   hookSendButton();
+  await scanConversation();
+}
+
+function startObservers() {
+  ensureWidget();
+  refreshPageState().catch((error) => {
+    logDebug("Initial conversation scan failed", error);
+  });
 
   domObserver = AIUsageDomObservers.createObserver(() => {
-    ensureInput();
-    hookSendButton();
+    refreshPageState().catch((error) => {
+      logDebug("Conversation scan failed", error);
+    });
   });
   domObserver.observe(document.body);
+
+  window.setInterval(() => {
+    conversationTracker?.retryQueued().catch(() => {});
+  }, LEDGER_RETRY_MS);
+  window.addEventListener("online", () => {
+    conversationTracker?.retryQueued().catch(() => {});
+  });
 
   window.addEventListener(
     "scroll",
@@ -555,14 +671,12 @@ contentController = AIUsageContentController.create({
   api: AIUsageAPI,
   debounceMs: ANALYZE_DEBOUNCE_MS,
   onLiveSuccess(data, message) {
-    liveEstimateState = { ...data, message };
     updateLiveWidget(data, message);
   },
   onLiveError(error) {
     setLiveError(`Live estimate unavailable: ${error}`);
   },
   onLiveClear() {
-    liveEstimateState = null;
     optimizationMessage = "";
     resetOptimizationPresentation();
     setWidgetHidden();
@@ -584,6 +698,28 @@ contentController = AIUsageContentController.create({
   },
 });
 
+conversationTracker = AIUsageConversationTracker.create({
+  storage: {
+    async load() {
+      const stored = await storageGet([STORAGE_KEYS.ledgerQueue]);
+      return stored[STORAGE_KEYS.ledgerQueue] || [];
+    },
+    async save(queue) {
+      await storageSet({ [STORAGE_KEYS.ledgerQueue]: queue });
+    },
+  },
+  recordEvent(payload) {
+    return AIUsageAPI.recordEvent(payload);
+  },
+  stabilityMs: ASSISTANT_STABILITY_MS,
+  onStatus(status) {
+    updateLedgerStatus(status);
+  },
+  onRecorded(data, payload) {
+    persistCorrectedSessionTotal(data, payload).catch(() => {});
+  },
+});
+
 async function init() {
   await loadConfig();
   await loadSelectedModel();
@@ -596,10 +732,18 @@ async function init() {
     logDebug("Unsupported host", window.location.host);
     return;
   }
+  await conversationTracker.initialize();
+  await loadCachedSessionTotal();
   startObservers();
 }
 
 chrome.storage.onChanged.addListener((changes) => {
+  if (changes[STORAGE_KEYS.sessionTokens] && sessionId) {
+    const totals = changes[STORAGE_KEYS.sessionTokens].newValue || {};
+    if (Object.prototype.hasOwnProperty.call(totals, sessionId)) {
+      updateActualSessionTotal(Number(totals[sessionId]) || 0);
+    }
+  }
   if (changes[STORAGE_KEYS.modelProfile]) {
     selectedModelProfile = changes[STORAGE_KEYS.modelProfile].newValue || config.default_model_profile;
     if (ui?.modelEl) {

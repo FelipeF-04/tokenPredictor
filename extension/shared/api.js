@@ -35,6 +35,9 @@ const AIUsageAPI = (() => {
     optimize(payload) {
       return request({ action: "optimize", payload });
     },
+    recordEvent(payload) {
+      return request({ action: "recordEvent", payload });
+    },
     commit(sessionId, deltaTokens, modelProfile) {
       return request({
         action: "commit",

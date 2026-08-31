@@ -65,19 +65,117 @@ const AIUsageDomExtractors = (() => {
     element.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
-  function extractMessages(root, maxMessages) {
+  function uniqueMessageNodes(root) {
     const nodes = findAllMatches(AIUsageDomSelectors.message, root);
+    return Array.from(new Set(nodes));
+  }
+
+  function ancestors(node) {
     const results = [];
-    const seen = new Set();
+    let current = node;
+    while (current) {
+      results.push(current);
+      current = current.parentElement;
+    }
+    return results;
+  }
+
+  function normalizeIdentifier(value) {
+    return String(value || "").trim().replace(/\s+/g, "-").slice(0, 220);
+  }
+
+  function getStableEventId(node, role, fallbackIndex) {
+    const hierarchy = ancestors(node);
+    for (const candidate of hierarchy) {
+      const testId = candidate.getAttribute?.("data-testid") || "";
+      if (testId.startsWith("conversation-turn-")) {
+        return `turn:${normalizeIdentifier(testId)}:${role}`;
+      }
+    }
+    for (const candidate of hierarchy) {
+      const messageId = candidate.getAttribute?.("data-message-id");
+      if (messageId) {
+        return `message:${normalizeIdentifier(messageId)}:${role}`;
+      }
+    }
+    for (const candidate of hierarchy) {
+      const elementId = candidate.getAttribute?.("id");
+      if (elementId && elementId !== "prompt-textarea") {
+        return `element:${normalizeIdentifier(elementId)}:${role}`;
+      }
+    }
+    return `fallback:${role}:${fallbackIndex}`;
+  }
+
+  function hasStreamingMarker(node) {
+    for (const candidate of ancestors(node)) {
+      const streaming = candidate.getAttribute?.("data-is-streaming");
+      const busy = candidate.getAttribute?.("aria-busy");
+      const className = candidate.getAttribute?.("class") || "";
+      if (
+        streaming === "true" ||
+        busy === "true" ||
+        className.split(/\s+/).includes("result-streaming")
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function extractMessageEvents(root) {
+    const nodes = uniqueMessageNodes(root);
+    const results = [];
+    const roleIndexes = { user: 0, assistant: 0 };
     for (const node of nodes) {
       const role = (node.getAttribute(AIUsageDomSelectors.roleAttribute) || "").trim();
-      if (!role) {
+      if (role !== "user" && role !== "assistant") {
         continue;
       }
       const content = (node.innerText || "").trim();
       if (!content) {
         continue;
       }
+      roleIndexes[role] += 1;
+      results.push({
+        eventId: getStableEventId(node, role, roleIndexes[role]),
+        role,
+        content,
+        streaming: role === "assistant" && hasStreamingMarker(node),
+        node,
+      });
+    }
+
+    const stopButton = findFirstMatch(AIUsageDomSelectors.stopButton, root);
+    if (stopButton) {
+      for (let index = results.length - 1; index >= 0; index -= 1) {
+        if (results[index].role === "assistant") {
+          results[index].streaming = true;
+          break;
+        }
+      }
+    }
+
+    const deduplicated = new Map();
+    for (const result of results) {
+      const existing = deduplicated.get(result.eventId);
+      if (!existing || result.content.length >= existing.content.length) {
+        deduplicated.set(result.eventId, {
+          ...result,
+          streaming: Boolean(result.streaming || existing?.streaming),
+        });
+      } else if (result.streaming) {
+        existing.streaming = true;
+      }
+    }
+    return Array.from(deduplicated.values());
+  }
+
+  function extractMessages(root, maxMessages) {
+    const events = extractMessageEvents(root);
+    const results = [];
+    const seen = new Set();
+    for (const { role, content } of events) {
       const key = `${role}|${content}`;
       if (seen.has(key)) {
         continue;
@@ -98,5 +196,6 @@ const AIUsageDomExtractors = (() => {
     getInputValue,
     setInputValue,
     extractMessages,
+    extractMessageEvents,
   };
 })();

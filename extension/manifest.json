@@ -21,6 +21,7 @@
         "dom/extractors.js",
         "dom/observers.js",
         "shared/api.js",
+        "conversation_tracker.js",
         "content_controller.js",
         "content.js"
       ],

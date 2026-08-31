@@ -147,6 +147,150 @@ class AnalyzeEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("Unknown model_profile", response.get_json()["error"])
 
+    def test_event_endpoint_is_idempotent_and_corrects_updates(self):
+        payload = {
+            "session_id": "event-session",
+            "event_id": "turn-1:assistant",
+            "role": "assistant",
+            "text": "one two three four",
+            "model_profile": "local-8k",
+        }
+
+        created = self.client.post("/events", json=payload)
+        unchanged = self.client.post("/events", json=payload)
+        updated = self.client.post(
+            "/events",
+            json={**payload, "text": "one two"},
+        )
+
+        self.assertEqual(created.status_code, 200)
+        created_data = created.get_json()
+        self.assertEqual(created_data["event_status"], "created")
+        self.assertEqual(created_data["event_tokens"], 4)
+        self.assertEqual(created_data["corrected_session_total"], 4)
+        self.assertEqual(created_data["context_window"], 8_192)
+        self.assertEqual(created_data["risk_level"], "green")
+        self.assertEqual(len(created_data["content_hash"]), 64)
+        expected_fields = {
+            "event_status",
+            "event_id",
+            "event_role",
+            "event_tokens",
+            "content_hash",
+            "event_created_at",
+            "event_updated_at",
+            "session_id",
+            "session_tokens",
+            "corrected_session_total",
+            "context_window",
+            "reserved_output_tokens",
+            "available_context_tokens",
+            "utilization_ratio",
+            "risk_level",
+        }
+        self.assertTrue(expected_fields.issubset(created_data))
+        for field in {
+            "event_tokens",
+            "session_tokens",
+            "corrected_session_total",
+            "context_window",
+            "reserved_output_tokens",
+            "available_context_tokens",
+        }:
+            self.assertIs(type(created_data[field]), int, field)
+        self.assertIs(type(created_data["utilization_ratio"]), float)
+        self.assertIs(type(created_data["event_created_at"]), float)
+        self.assertIs(type(created_data["event_updated_at"]), float)
+
+        self.assertEqual(unchanged.get_json()["event_status"], "unchanged")
+        self.assertEqual(unchanged.get_json()["corrected_session_total"], 4)
+        self.assertEqual(updated.get_json()["event_status"], "updated")
+        self.assertEqual(updated.get_json()["event_tokens"], 2)
+        self.assertEqual(updated.get_json()["corrected_session_total"], 2)
+
+    def test_event_endpoint_counts_tokens_in_backend(self):
+        response = self.client.post(
+            "/events",
+            json={
+                "session_id": "authoritative",
+                "event_id": "turn-1:user",
+                "role": "user",
+                "text": "backend counts these tokens",
+                "token_count": 99_999,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["event_tokens"], 4)
+        self.assertEqual(response.get_json()["corrected_session_total"], 4)
+
+    def test_event_endpoint_validates_payload(self):
+        valid = {
+            "session_id": "validation",
+            "event_id": "turn-1:user",
+            "role": "user",
+            "text": "valid text",
+        }
+        invalid_payloads = [
+            ({**valid, "session_id": ""}, "session_id"),
+            ({**valid, "event_id": ""}, "event_id"),
+            ({**valid, "role": "system"}, "role"),
+            ({**valid, "text": ""}, "text"),
+            ({**valid, "text": 123}, "text"),
+            ({**valid, "event_id": "x" * (app_module.MAX_EVENT_ID_CHARS + 1)}, "event_id"),
+        ]
+
+        for payload, expected_error in invalid_payloads:
+            with self.subTest(expected_error=expected_error):
+                response = self.client.post("/events", json=payload)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(expected_error, response.get_json()["error"])
+
+    def test_event_endpoint_rejects_non_object_or_malformed_json(self):
+        responses = [
+            self.client.post("/events", data="not-json", content_type="application/json"),
+            self.client.post("/events", json=["not", "an", "object"]),
+            self.client.post("/events", data="plain text", content_type="text/plain"),
+        ]
+
+        for response in responses:
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("JSON object", response.get_json()["error"])
+
+    def test_event_endpoint_rejects_oversized_text(self):
+        with self.assertLogs(app_module.app.logger, level="WARNING"):
+            response = self.client.post(
+                "/events",
+                json={
+                    "session_id": "oversized-event",
+                    "event_id": "turn-1:user",
+                    "role": "user",
+                    "text": "x" * (app_module.MAX_ANALYZE_MESSAGE_CHARS + 1),
+                },
+            )
+
+        self.assertEqual(response.status_code, 413)
+        self.assertIn("at most", response.get_json()["error"])
+
+    def test_event_endpoint_reports_unavailable_tokenizer(self):
+        def unavailable(_name):
+            raise OSError("offline")
+
+        tokenizer.reset_encoding_cache(loader=unavailable)
+        with self.assertLogs(app_module.app.logger, level="WARNING"):
+            response = self.client.post(
+                "/events",
+                json={
+                    "session_id": "offline-event",
+                    "event_id": "turn-1:user",
+                    "role": "user",
+                    "text": "cannot tokenize",
+                },
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("Tokenizer encoding", response.get_json()["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

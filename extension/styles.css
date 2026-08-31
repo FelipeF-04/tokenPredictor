@@ -154,6 +154,36 @@
   margin-bottom: 4px;
 }
 
+.ai-sync-status,
+.ai-usage-sync-status {
+  margin: 6px 0 8px;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--ai-muted);
+}
+
+.ai-sync-status::before,
+.ai-usage-sync-status::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 999px;
+  background: var(--ai-green);
+  vertical-align: 1px;
+}
+
+.ai-sync-status--waiting::before,
+.ai-usage-sync-status--waiting::before {
+  background: var(--ai-yellow);
+}
+
+.ai-sync-status--queued::before,
+.ai-usage-sync-status--queued::before {
+  background: var(--ai-red);
+}
+
 .ai-usage-row span:last-child {
   margin-left: 12px;
   font-variant-numeric: tabular-nums;

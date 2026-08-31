@@ -208,6 +208,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
+  if (request.action === "recordEvent") {
+    getConfig()
+      .then((config) => postJSON(`${config.backend_base_url}/events`, request.payload || {}))
+      .then((data) => sendResponse({ success: true, data }))
+      .catch((error) => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+
   if (request.action === "commit") {
     getConfig()
       .then((config) =>

@@ -2,6 +2,7 @@ const STORAGE_KEYS = {
   sessionTokens: "aiUsageSessionTokens",
   activeSession: "aiUsageActiveSessionId",
   modelProfile: "aiUsageModelProfile",
+  ledgerStatus: "aiUsageLedgerStatus",
 };
 
 const DEFAULT_CONFIG = {
@@ -17,6 +18,7 @@ const resetBtn = document.getElementById("resetBtn");
 const statusTextEl = document.getElementById("statusText");
 const modelSelectEl = document.getElementById("modelSelect");
 const contextWindowEl = document.getElementById("contextWindow");
+const syncStatusEl = document.getElementById("syncStatus");
 
 let config = DEFAULT_CONFIG;
 let models = [];
@@ -80,6 +82,29 @@ function updateUI(totalTokens) {
 function updateContextWindow() {
   const tokenWindow = getTokenWindow();
   contextWindowEl.textContent = tokenWindow > 0 ? tokenWindow.toLocaleString() : "-";
+}
+
+function renderLedgerStatus(status) {
+  const normalized = status && ["synced", "waiting", "queued"].includes(status.state)
+    ? status
+    : { state: "synced", text: "Session synced" };
+  syncStatusEl.textContent = normalized.text || "Session synced";
+  syncStatusEl.classList.remove(
+    "ai-sync-status--synced",
+    "ai-sync-status--waiting",
+    "ai-sync-status--queued"
+  );
+  syncStatusEl.classList.add(`ai-sync-status--${normalized.state}`);
+}
+
+async function loadLedgerStatus() {
+  if (!activeSessionId) {
+    renderLedgerStatus();
+    return;
+  }
+  const stored = await storageGet([STORAGE_KEYS.ledgerStatus]);
+  const statuses = stored[STORAGE_KEYS.ledgerStatus] || {};
+  renderLedgerStatus(statuses[activeSessionId]);
 }
 
 function populateModelSelect() {
@@ -213,6 +238,11 @@ chrome.storage.onChanged.addListener((changes) => {
   if (changes[STORAGE_KEYS.activeSession]) {
     activeSessionId = changes[STORAGE_KEYS.activeSession].newValue || null;
     syncSessionTokens();
+    loadLedgerStatus();
+  }
+  if (changes[STORAGE_KEYS.ledgerStatus] && activeSessionId) {
+    const statuses = changes[STORAGE_KEYS.ledgerStatus].newValue || {};
+    renderLedgerStatus(statuses[activeSessionId]);
   }
 });
 
@@ -223,6 +253,7 @@ async function init() {
   await loadSelectedModel();
   populateModelSelect();
   updateContextWindow();
+  await loadLedgerStatus();
   syncSessionTokens();
 }
 

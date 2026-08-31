@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,8 @@ app = Flask(__name__)
 
 MAX_ANALYZE_MESSAGE_CHARS = 100_000
 MAX_REQUEST_BYTES = 1_048_576
+MAX_EVENT_ID_CHARS = 256
+MAX_SESSION_ID_CHARS = 128
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5000
 _CHROME_EXTENSION_ORIGIN = re.compile(r"^chrome-extension://[a-p]{32}$")
@@ -233,6 +236,105 @@ def commit():
 
     session = _session_store.commit_tokens(session_id, delta_value, model_profile)
     return jsonify({"session_id": session.session_id, "session_tokens": session.total_tokens})
+
+
+@app.route("/events", methods=["POST", "OPTIONS"])
+def record_conversation_event():
+    if request.method == "OPTIONS":
+        return _handle_options()
+
+    data, error = _json_object()
+    if error:
+        return error
+
+    session_id = data.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return _json_error("session_id must be a non-empty string")
+    session_id = session_id.strip()
+    if len(session_id) > MAX_SESSION_ID_CHARS:
+        return _json_error(
+            f"session_id must be at most {MAX_SESSION_ID_CHARS} characters"
+        )
+
+    event_id = data.get("event_id")
+    if not isinstance(event_id, str) or not event_id.strip():
+        return _json_error("event_id must be a non-empty string")
+    event_id = event_id.strip()
+    if len(event_id) > MAX_EVENT_ID_CHARS:
+        return _json_error(
+            f"event_id must be at most {MAX_EVENT_ID_CHARS} characters"
+        )
+
+    role = data.get("role")
+    if role not in {"user", "assistant"}:
+        return _json_error("role must be user or assistant")
+
+    text = data.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return _json_error("text must be a non-empty string")
+    text = text.strip()
+    if len(text) > MAX_ANALYZE_MESSAGE_CHARS:
+        return _json_error(
+            f"text must be at most {MAX_ANALYZE_MESSAGE_CHARS} characters",
+            status=413,
+            log_event="event_text_too_large",
+        )
+
+    model_profile = data.get("model_profile")
+    try:
+        profile = _resolve_model_profile(model_profile)
+    except ValueError as exc:
+        return _json_error(str(exc))
+
+    try:
+        token_count = count_tokens(text)
+    except TokenizerUnavailableError as exc:
+        return _json_error(
+            str(exc), status=503, log_event="tokenizer_unavailable", exception=exc
+        )
+
+    content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    try:
+        result = _session_store.record_event(
+            session_id=session_id,
+            event_id=event_id,
+            role=role,
+            token_count=token_count,
+            content_hash=content_hash,
+            model_profile=profile.name,
+        )
+    except ValueError as exc:
+        return _json_error(str(exc))
+
+    context_window = profile.context_window or _config.token_window
+    reserved_output_tokens = min(max(profile.max_output_tokens, 0), context_window)
+    corrected_total = result.session.total_tokens
+    available_context_tokens = max(
+        context_window - reserved_output_tokens - corrected_total,
+        0,
+    )
+    utilization_ratio = corrected_total / context_window if context_window > 0 else 1.0
+    risk = risk_level(corrected_total, 0, token_window=context_window)
+
+    return jsonify(
+        {
+            "event_status": result.status,
+            "event_id": result.event.event_id,
+            "event_role": result.event.role,
+            "event_tokens": result.event.token_count,
+            "content_hash": result.event.content_hash,
+            "event_created_at": result.event.created_at,
+            "event_updated_at": result.event.updated_at,
+            "session_id": result.session.session_id,
+            "session_tokens": corrected_total,
+            "corrected_session_total": corrected_total,
+            "context_window": context_window,
+            "reserved_output_tokens": reserved_output_tokens,
+            "available_context_tokens": available_context_tokens,
+            "utilization_ratio": utilization_ratio,
+            "risk_level": risk,
+        }
+    )
 
 
 @app.route("/optimize", methods=["POST", "OPTIONS"])

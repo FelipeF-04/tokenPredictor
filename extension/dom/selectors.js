@@ -16,5 +16,10 @@ const AIUsageDomSelectors = {
     "article [data-message-author-role]",
     "div[data-message-author-role]",
   ],
+  stopButton: [
+    "button[data-testid='stop-button']",
+    "button[aria-label*='Stop']",
+    "button[aria-label*='stop']",
+  ],
   roleAttribute: "data-message-author-role",
 };

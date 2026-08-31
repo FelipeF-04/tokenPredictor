@@ -17,7 +17,7 @@ Most chat UIs hide token counts. This project makes them visible in real time an
 
 - Live input token count, predicted output estimate, projected session total, and available context.
 - A simple risk color (green/yellow/red) for the current session.
-- A session total that updates when you send messages.
+- An actual session total backed by a durable, idempotent conversation ledger.
 - Optional context packing with a preview that you explicitly choose whether to apply.
 
 ## Two operating modes
@@ -29,6 +29,15 @@ The extension automatically calls `POST /analyze` after a short typing pause. Th
 ### Context optimization
 
 Select **Optimize context** when you want the richer packing pipeline. Only that explicit action calls `POST /optimize`; ordinary typing never does. Optimization may initialize the configured local sentence-transformers model, so its first run can take longer and the model must already be available when working offline. The packed prompt is shown as a preview and is never placed into the draft unless you select **Apply optimized prompt**.
+
+## Estimated versus actual usage
+
+The widget deliberately shows two different views of the conversation:
+
+- **Live draft estimate** is calculated before sending. It combines the current committed session total with the draft input and predicted reply size. The reply portion is a heuristic and can be higher or lower than the answer ChatGPT eventually produces.
+- **Actual session total** is calculated after messages appear in the conversation. The backend tokenizes each user turn and each stable, completed assistant turn, records it in SQLite, and returns the corrected total. Assistant edits or regenerations update the existing ledger entry instead of adding the message again.
+
+Ledger synchronization is asynchronous and never blocks typing or sending. The widget and popup show **Session synced**, **Waiting for response to finish**, or a queued-event count. If the local backend is unavailable, events remain in Chrome local storage and retry every 15 seconds, when connectivity returns, and after a page reload.
 
 ## What it looks like
 
@@ -53,8 +62,9 @@ The popup gives you the same idea at a session level, so you can see how the con
 2. As you type, the content script sends your draft to the local `/analyze` endpoint after a 300 ms debounce.
 3. The backend tokenizes input, estimates output, and calculates available context with light heuristics.
 4. A risk score is computed using the selected model profile and configurable thresholds.
-5. When you send a message, the session total is committed.
-6. If requested, `/optimize` runs the separate embedding-backed context packing flow.
+5. DOM message identifiers, roles, and content are sent to `/events`; the backend performs authoritative token counting and idempotently updates the SQLite ledger.
+6. Assistant turns are recorded only after streaming indicators disappear and their content remains unchanged for 2.5 seconds.
+7. If requested, `/optimize` runs the separate embedding-backed context packing flow.
 
 ## Built with
 
@@ -67,10 +77,12 @@ The popup gives you the same idea at a session level, so you can see how the con
 
 - [backend/app.py](backend/app.py) - Flask API endpoints.
 - [backend/tokenizer.py](backend/tokenizer.py) - Token counting via `tiktoken`.
+- [backend/storage/session_store.py](backend/storage/session_store.py) - Durable sessions and the idempotent conversation ledger.
 - [backend/predictor.py](backend/predictor.py) - Output prediction + risk rules.
 - [backend/tests/](backend/tests/) - Offline backend unit and API contract tests.
 - [extension/content.js](extension/content.js) - Floating widget and page hooks.
 - [extension/content_controller.js](extension/content_controller.js) - Debounced analysis and explicit optimization control.
+- [extension/conversation_tracker.js](extension/conversation_tracker.js) - Stable-response detection, local queueing, and ledger retries.
 - [extension/popup.html](extension/popup.html) - Popup layout.
 - [extension/popup.js](extension/popup.js) - Popup logic + reset action.
 - [extension/tests/](extension/tests/) - Node tests and ChatGPT DOM compatibility fixtures.
@@ -144,7 +156,8 @@ Selector behavior is captured in small, non-sensitive HTML files under [extensio
 1. Add or update a minimal fixture containing only the relevant input, send button, and message-role structure. Do not copy real conversation content or account data.
 2. Update [extension/dom/selectors.js](extension/dom/selectors.js) with the narrowest stable selector, preferring `data-*` or accessible attributes over generated classes.
 3. Update [extension/tests/dom_fixtures.test.js](extension/tests/dom_fixtures.test.js) if the expected structure or extraction behavior changed.
-4. Run `python run_tests.py`, then manually load the unpacked extension and verify typing, sending, optimization, and applying a packed prompt on each supported ChatGPT host.
+4. Update or add tracker scenarios in [extension/tests/conversation_tracker.test.js](extension/tests/conversation_tracker.test.js), including stable turn identifiers and streaming markers.
+5. Run `python run_tests.py`, then manually load the unpacked extension and verify typing, sending, response completion, regeneration, optimization, and applying a packed prompt on each supported ChatGPT host.
 
 The fixture tests deliberately use a small dependency-free DOM implementation rather than browser automation. This keeps CI fast, but visual layout and real-site event behavior still require that final manual browser check.
 
@@ -158,7 +171,7 @@ AI_USAGE_ALLOWED_ORIGINS=chrome-extension://<extension-id>
 
 `AI_USAGE_ENV=development` allows loopback web origins and syntactically valid unpacked Chrome extension origins. Debug mode remains off unless `AI_USAGE_DEBUG=1` is also set. `AI_USAGE_PORT` changes the port; `AI_USAGE_HOST` can change the bind address, but exposing the backend beyond loopback is not recommended.
 
-The server caps request bodies at 1 MiB and `/analyze` messages at 100,000 characters. Operational error logs contain structured status, route, method, and exception type fields but never request payloads.
+The server caps request bodies at 1 MiB and both `/analyze` messages and `/events` text at 100,000 characters. Operational error logs contain structured status, route, method, and exception type fields but never request payloads.
 
 ## API endpoints (local)
 
@@ -167,6 +180,7 @@ The server caps request bodies at 1 MiB and `/analyze` messages at 100,000 chara
 - `GET /session/<id>` - Fetches the durable session state.
 - `POST /session/<id>/reset` - Resets a durable session.
 - `POST /analyze` - Returns input tokens, predicted output tokens, projected total, risk, context window, reserved output, available context, and utilization.
+- `POST /events` - Records or updates one user/assistant message, counts its tokens in the backend, and returns its ledger status plus the corrected session/context/risk data.
 - `POST /commit` - Adds token deltas to a durable session.
 - `POST /optimize` - Runs the optimization pipeline for a session.
 
@@ -175,6 +189,9 @@ The server caps request bodies at 1 MiB and `/analyze` messages at 100,000 chara
 - The backend must be running at `http://localhost:5000` for live updates.
 - Backend session totals persist locally in SQLite and recover after restarts.
 - Output prediction uses heuristics, so treat it as an estimate, not an exact count.
+- Duplicate prevention uses the SQLite primary key `(session_id, event_id)`. Identical content is returned as `unchanged`; changed content under the same event ID replaces its previous token count and adjusts the total by the difference.
+- Assistant completion detection is DOM-based. The extension honors known streaming/stop markers, then requires 2.5 seconds of stable content. A quiet streaming pause or a ChatGPT DOM change can cause an early or delayed sync; a later observation of the same event corrects the ledger rather than double-counting it.
+- Stable ChatGPT turn IDs are preferred over generated CSS classes. If the page exposes no stable turn/message ID, the fallback role/index identity is less reliable across structural DOM changes. Multiple hidden regeneration variants in the DOM may also require selector/fixture updates.
 - Tokenizer encoding initialization is lazy. If `cl100k_base` is not already available and cannot be fetched, the backend returns an intentional service error instead of failing during import. Tests inject a fake tokenizer and never require network access.
 - SQLite files, Python/Node caches, virtual environments, and downloaded model artifacts are ignored and should remain local.
 - The backend has no authentication or TLS. Its security model assumes a trusted local machine, a loopback bind, and an explicitly restricted extension-origin allowlist.
